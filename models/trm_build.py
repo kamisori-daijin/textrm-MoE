@@ -113,17 +113,37 @@ class CausalSelfAttention(nn.Module):
         return self.proj(y)
 
 
-
 class TransformerBlock(nn.Module):
+    """
+    Single transformer block using MoE instead of a static MLP.
+    Designed for recursive reasoning where routing happens at each step.
+    """
     def __init__(self, dim, n_heads, mlp_ratio=4, max_seq_len=512, num_experts=4):
         super().__init__()
         self.norm1 = RMSNorm(dim)
         self.attn = CausalSelfAttention(dim, n_heads, max_seq_len)
         self.norm2 = RMSNorm(dim)
-        self.moe = MoELayer(dim, mlp_ratio, num_experts=num_experts)
+        
+        # Replace SwiGLU with MoELayer
+        # Note: shared_expert=True is recommended for small models
+        self.moe = MoELayer(
+            dim=dim, 
+            mlp_ratio=mlp_ratio, 
+            num_experts=num_experts, 
+            top_k=1, 
+            shared_expert=True
+        )
 
-    def forward(self, x, expert_idx=None):
+    def forward(self, x):
+        """
+        Standard pre-norm residual connection.
+        The MoE layer internally handles routing and load balancing.
+        """
+        # Attention sub-layer
         x = x + self.attn(self.norm1(x))
-        x = x + self.moe(self.norm2(x), expert_idx=expert_idx) # expert_idxを渡す
+        
+        # MoE sub-layer (Replaces static MLP)
+        x = x + self.moe(self.norm2(x))
+        
         return x
 
