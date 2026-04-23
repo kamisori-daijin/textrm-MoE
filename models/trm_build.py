@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from datasets import load_dataset
 from transformers import GPT2Tokenizer
+from models.moe import MoELayer
 import math
 import os
 from tqdm import tqdm
@@ -112,16 +113,17 @@ class CausalSelfAttention(nn.Module):
         return self.proj(y)
 
 
+
 class TransformerBlock(nn.Module):
-    """Single transformer block with pre-norm"""
-    def __init__(self, dim, n_heads, mlp_ratio=4, max_seq_len=512):
+    def __init__(self, dim, n_heads, mlp_ratio=4, max_seq_len=512, num_experts=4):
         super().__init__()
         self.norm1 = RMSNorm(dim)
         self.attn = CausalSelfAttention(dim, n_heads, max_seq_len)
         self.norm2 = RMSNorm(dim)
-        self.mlp = SwiGLU(dim, dim * mlp_ratio)
+        self.moe = MoELayer(dim, mlp_ratio, num_experts=num_experts)
 
-    def forward(self, x):
+    def forward(self, x, expert_idx=None):
         x = x + self.attn(self.norm1(x))
-        x = x + self.mlp(self.norm2(x))
+        x = x + self.moe(self.norm2(x), expert_idx=expert_idx) # expert_idxを渡す
         return x
+
