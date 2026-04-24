@@ -118,7 +118,7 @@ class TransformerBlock(nn.Module):
     Single transformer block using MoE instead of a static MLP.
     Designed for recursive reasoning where routing happens at each step.
     """
-    def __init__(self, dim, n_heads, mlp_ratio=4, max_seq_len=512, num_experts=4):
+    def __init__(self, dim, n_heads, mlp_ratio=4, max_seq_len=512, num_experts=8):
         super().__init__()
         self.norm1 = RMSNorm(dim)
         self.attn = CausalSelfAttention(dim, n_heads, max_seq_len)
