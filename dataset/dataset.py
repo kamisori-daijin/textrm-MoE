@@ -1,9 +1,12 @@
 import torch
 from torch.utils.data import Dataset
-from datasets import load_dataset
+from datasets import load_dataset, interleave_datasets
 from tqdm import tqdm
 
 class PackedDataset(Dataset):
+    """
+    A simple wrapper to hold the tokenized and packed data.
+    """
     def __init__(self, examples):
         self.examples = examples
 
@@ -11,85 +14,73 @@ class PackedDataset(Dataset):
         return len(self.examples)
 
     def __getitem__(self, idx):
-        # examples[idx] is a dict: {"input_ids": tensor, "labels": tensor}
+        # Returns input_ids and target labels
         ex = self.examples[idx]
         return ex["input_ids"], ex["labels"]
 
 def get_packed_dataset(
     tokenizer,
-    dataset_name="Kamisori-daijin/email-datasets-v2-100k",
-    max_length=256,
-    max_samples= 100000,
-    split="train",
-    val_ratio=0.1
+    max_length=512, 
+    max_samples=300000, 
+    val_ratio=0.01
 ):
-    print(f"Loading and packing dataset: {dataset_name}")
+    """
+    Loads, filters, and packs the SmolLM-Corpus subsets into a fixed-length dataset.
+    """
+    print("Loading SmolLM-Corpus subsets: Cosmopedia v2, FineWeb-Edu, and Python-Edu...")
+
+    # Load high-quality educational subsets in streaming mode
+    # 1. Cosmopedia v2: Synthetic textbooks and stories
+    ds_cosmo = load_dataset("HuggingFaceTB/smollm-corpus", "cosmopedia-v2", split="train", streaming=True)
     
-    dataset = load_dataset(dataset_name, split=split, streaming=True)
+    # 2. FineWeb-Edu: High-score educational web pages
+    ds_fineweb = load_dataset("HuggingFaceTB/smollm-corpus", "fineweb-edu-dedup", split="train", streaming=True)
+    
+    # 3. Python-Edu: Cleaned educational Python code
+    ds_python = load_dataset("HuggingFaceTB/smollm-corpus", "python-edu", split="train", streaming=True)
+
+    # Interleave datasets to balance knowledge, web reasoning, and logic
+    # Using 40% Cosmo, 40% FineWeb, and 20% Python for a balanced brain
+    combined_ds = interleave_datasets(
+        [ds_cosmo, ds_fineweb, ds_python], 
+        probabilities=[0.4, 0.4, 0.2], 
+        streaming=True
+    )
     
     all_packed_examples = []
     buffer_ids = []
-    buffer_labels = []
-    
-    # Special tokens
-    think_token = "<think>"
     eos_id = tokenizer.eos_token_id
 
-    pbar = tqdm(total=max_samples, desc="Packing data")
+    pbar = tqdm(total=max_samples, desc="Packing 300k Blocks")
     
-    for item in dataset:
-        text = item.get("text", "")
-        if not text:
+    for item in combined_ds:
+        # Extract text based on the specific schema of each subset
+        text = item.get("text") or item.get("content") or ""
+        if len(text) < 100:
             continue
+
+        # Encode text with BOS (automatically added by LlamaTokenizer if configured)
+        ids = tokenizer.encode(text, add_special_tokens=True)
         
-        # Loss Masking Logic:
-        # We want to mask everything before <think>
-        parts = text.split(think_token)
-        if len(parts) < 2:
-            # If <think> is not found, we might want to skip or treat differently.
-            # Here we just treat the whole thing as label.
-            prompt_text = ""
-            completion_text = text
-        else:
-            prompt_text = parts[0]
-            completion_text = think_token + parts[1]
+        # Ensure the sequence ends with an EOS token
+        if not ids or ids[-1] != eos_id:
+            ids.append(eos_id)
 
-        # Tokenize prompt (to be masked)
-        prompt_ids = tokenizer.encode(prompt_text, add_special_tokens=False)
-        # Tokenize completion (to be learned)
-        completion_ids = tokenizer.encode(completion_text, add_special_tokens=False)
-        if not completion_ids or completion_ids[-1] != eos_id:
-            completion_ids.append(eos_id)
+        buffer_ids.extend(ids)
 
-        # Create IDs and Labels
-        item_ids = prompt_ids + completion_ids
-        item_labels = ([-100] * len(prompt_ids)) + completion_ids
-
-        buffer_ids.extend(item_ids)
-        buffer_labels.extend(item_labels)
-
-        # Packing process
-        while len(buffer_ids) >= max_length:
-            chunk_ids = buffer_ids[:max_length]
-            chunk_labels = buffer_labels[:max_length]
+        # Packing Logic (Non-overlapping):
+        # We need (max_length + 1) tokens to create an input/label pair of max_length
+        while len(buffer_ids) >= max_length + 1:
+            chunk = buffer_ids[:max_length + 1]
             
-            # Since the model predicts the NEXT token:
-            # input:  tokens[0...N-1]
-            # target: labels[1...N]
-            # We need max_length tokens to produce (max_length-1) length sequences
-            # But wait, if config['max_seq_len'] is 256, we need 257 tokens in the chunk.
-            
+            # Prediction task: given tokens [0...N-1], predict [1...N]
             all_packed_examples.append({
-                "input_ids": torch.tensor(chunk_ids[:-1], dtype=torch.long),
-                "labels": torch.tensor(chunk_labels[1:], dtype=torch.long)
+                "input_ids": torch.tensor(chunk[:-1], dtype=torch.long),
+                "labels": torch.tensor(chunk[1:], dtype=torch.long)
             })
             
-            # Move buffer forward (non-overlapping)
-            # Actually, to avoid losing the target for the last token of the chunk,
-            # we should keep 1 token overlap if we want continuous prediction.
-            # But for standard packing, we just slide.
-            buffer_ids = buffer_ids[max_length-1:]
-            buffer_labels = buffer_labels[max_length-1:]
+            # Efficient Packing: discard used tokens and move to the next block
+            buffer_ids = buffer_ids[max_length:] 
 
             pbar.update(1)
             if len(all_packed_examples) >= max_samples:
@@ -100,14 +91,10 @@ def get_packed_dataset(
             
     pbar.close()
 
-    # Split into train and val
-    val_size = int(len(all_packed_examples) * val_ratio)
-    train_size = len(all_packed_examples) - val_size
+    # Split into Train and Validation sets
+    val_idx = int(len(all_packed_examples) * (1 - val_ratio))
+    train_data = all_packed_examples[:val_idx]
+    val_data = all_packed_examples[val_idx:]
     
-    # Random split or sequential? Usually sequential for streaming is fine.
-    train_examples = all_packed_examples[:train_size]
-    val_examples = all_packed_examples[train_size:]
-    
-    print(f"Total blocks: {len(all_packed_examples)} (Train: {len(train_examples)}, Val: {len(val_examples)})")
-    
-    return PackedDataset(train_examples), PackedDataset(val_examples)
+    print(f"Data packing complete. Train: {len(train_data)}, Val: {len(val_data)}")
+    return PackedDataset(train_data), PackedDataset(val_data)
