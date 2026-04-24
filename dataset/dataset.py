@@ -44,7 +44,7 @@ def get_packed_dataset(
     combined_ds = interleave_datasets(
         [ds_cosmo, ds_fineweb, ds_python], 
         probabilities=[0.4, 0.4, 0.2], 
-        streaming=True
+        
     )
     
     all_packed_examples = []

@@ -1,0 +1,23 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.ruff_cache
+alpaca_dolly_combined/
+
+# Virtual environments
+.venv
+
+.DS_Store
+*.pt
+*.safetensors
+login.py
+textrm-2.0-tokenizer/
+
+
+chekpoint1.0/
+checkpoints2.0/
+checkpoints1.5/
