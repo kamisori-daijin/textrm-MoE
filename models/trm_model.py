@@ -8,7 +8,7 @@ class TinyRecursiveNetwork(nn.Module):
     The core tiny network used in TRM.
     Equipped with MoE layers that autonomously route tokens at each step.
     """
-    def __init__(self, dim, n_heads=8, n_layers=2, mlp_ratio=4, max_seq_len=512, num_experts=4):
+    def __init__(self, dim, n_heads=8, n_layers=2, mlp_ratio=4, max_seq_len=512, num_experts=8):
         super().__init__()
         self.layers = nn.ModuleList([
             TransformerBlock(dim, n_heads, mlp_ratio, max_seq_len, num_experts)
