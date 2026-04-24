@@ -1,11 +1,11 @@
 config = {
     "vocab_size": 32005,  # TinyLlama(32k) + 5 Special Tokens
-    "dim": 512,  # Hidden dimension
+    "dim": 1024,  # Hidden dimension
     "n_heads": 16,  # Attention heads
-    "n_layers": 3,  # Only 3 layers (key insight from paper)
+    "n_layers": 4,  # Only 3 layers (key insight from paper)
     "mlp_ratio": 4,
-    "max_seq_len": 256,  # Reduced for stability
-    "n_latent_recursions": 4,  # n in paper (reduced for memory)
+    "max_seq_len": 512,  # Reduced for stability
+    "n_latent_recursions": 6,  # n in paper (reduced for memory)
     "n_improvement_cycles": 2,  # T in paper (reduced for memory)
     # Training
     "batch_size": 16,  # Reduced for MPS memory constraints
