@@ -1,18 +1,9 @@
-
 import os
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from datasets import load_dataset
-from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
-from transformers import GPT2Tokenizer
-
 from ema.ema import EMA
-
-# @contextmanager
-
 
 def train(
     model,
@@ -26,17 +17,22 @@ def train(
     n_supervision_steps=4,
     gradient_accumulation_steps=1,
     ema_decay=0.999,
+    aux_loss_coef=0.01, # Coefficient for MoE load balancing
     save_path="textrm-model.pt",
 ):
-    """Training loop with deep supervision and EMA"""
+    """
+    Enhanced training loop for textrm-MoE with deep supervision, 
+    EMA, and MoE auxiliary loss integration.
+    """
 
     model = model.to(device)
+    # High weight decay for stability in small, recursive models
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1
     )
     ema = EMA(model, decay=ema_decay)
 
-    # Learning rate scheduler with warmup
+    # Learning rate scheduler with linear warmup
     def lr_schedule(step):
         if step < warmup_steps:
             return step / warmup_steps
@@ -56,13 +52,22 @@ def train(
             input_ids = input_ids.to(device)
             targets = targets.to(device)
 
-            loss = model(input_ids, targets, n_supervision_steps=n_supervision_steps)
-            # Scale loss for accumulation
+            # 1. Forward pass: Calculates Cross-Entropy + Halting Loss
+            main_loss = model(input_ids, targets, n_supervision_steps=n_supervision_steps)
+            
+            # 2. Collect Auxiliary Losses from all MoE layers to ensure load balancing
+            # This forces the router to utilize all experts instead of just one.
+            total_aux_loss = sum(layer.moe.aux_loss for layer in model.net.layers)
+            
+            # 3. Combine losses
+            loss = main_loss + aux_loss_coef * total_aux_loss
+            
+            # Scale loss for gradient accumulation
             loss = loss / gradient_accumulation_steps
             loss.backward()
 
             if (i + 1) % gradient_accumulation_steps == 0 or (i + 1) == len(train_loader):
-                # Gradient clipping
+                # Gradient clipping to prevent explosion in recursive layers
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
 
                 optimizer.step()
@@ -72,14 +77,16 @@ def train(
 
                 global_step += 1
 
+            # Update progress bar with both primary and auxiliary loss values
             pbar.set_postfix(
                 {
                     "loss": f"{loss.item() * gradient_accumulation_steps:.4f}",
+                    "aux": f"{total_aux_loss.item():.4f}",
                     "lr": f"{scheduler.get_last_lr()[0]:.6f}",
                 }
             )
 
-        # Validation
+        # Validation phase
         ema.apply_shadow()
         model.eval()
         val_loss = 0.0
@@ -87,15 +94,15 @@ def train(
             for input_ids, targets in tqdm(val_loader, desc="Validation"):
                 input_ids = input_ids.to(device)
                 targets = targets.to(device)
-                loss = model(
-                    input_ids, targets, n_supervision_steps=n_supervision_steps
-                )
-                val_loss += loss.item()
+                # Validation loss also considers MoE balance
+                v_main_loss = model(input_ids, targets, n_supervision_steps=n_supervision_steps)
+                v_aux_loss = sum(layer.moe.aux_loss for layer in model.net.layers)
+                val_loss += (v_main_loss + aux_loss_coef * v_aux_loss).item()
 
         val_loss /= len(val_loader)
         print(f"Epoch {epoch + 1} - Val Loss: {val_loss:.4f}")
 
-        # Save per-epoch checkpoint (filename includes epoch and val_loss)
+        # Checkpoint Saving
         base, ext = os.path.splitext(save_path)
         if ext == "":
             ext = ".pt"
@@ -111,14 +118,15 @@ def train(
         )
         print(f"Saved checkpoint: {ckpt_path}")
 
-        # Generate sample
-        prompt = "Write a polite refusal email"
-        prompt_ids = torch.tensor([tokenizer.encode(prompt)], device=device)
-        generated = model.generate(prompt_ids, max_new_tokens=100)
+        # Generate sample to monitor text quality during training
+        # We use a static prompt to observe evolution of reasoning/style
+        test_prompt = "Write a polite refusal email"
+        test_ids = torch.tensor([tokenizer.encode(test_prompt)], device=device)
+        generated = model.generate(test_ids, max_new_tokens=50)
         generated_text = tokenizer.decode(generated[0].tolist())
-        print(f"Generated: {generated_text[:300]}...\n")
+        print(f"Sample Generation: {generated_text[:200]}...\n")
 
-        # Save best model
+        # Persistence of the best model based on validation loss
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save(
@@ -130,7 +138,7 @@ def train(
                 },
                 save_path,
             )
-            print(f"Saved best model with val_loss={val_loss:.4f}")
+            print(f"New best model saved (val_loss={val_loss:.4f})")
 
         ema.restore()
 
