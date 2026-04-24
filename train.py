@@ -15,7 +15,7 @@ if __name__ == '__main__':
     # Load and pack dataset once, then split
     train_dataset, val_dataset = get_packed_dataset(
         tokenizer,
-        max_length=config['max_seq_len'] + 1,
+        max_length=config['max_seq_len'],
         max_samples=config['max_train_samples'] + config['max_val_samples'],
         val_ratio=config['max_val_samples'] / (config['max_train_samples'] + config['max_val_samples'])
     )
@@ -24,14 +24,12 @@ if __name__ == '__main__':
         train_dataset,
         batch_size=config['batch_size'],
         shuffle=True,
-        num_workers=2,
-        pin_memory=True
+        num_workers=4,
     )
     val_loader = DataLoader(
         val_dataset,
         batch_size=config['batch_size'],
-        num_workers=2,
-        pin_memory=True
+        num_workers=4,
     )
 
     #Training
@@ -62,9 +60,14 @@ if __name__ == '__main__':
     model.eval()
     ema = EMA(model)
 
+        
     prompts = [
-        "Write a polite refusal email", 
+        "Explain why the sky looks blue during the day:", # General Science
+        "The following is a Python function for binary search:\ndef binary_search(arr, target):", # Code Completion
+        "Question: If a cube has 6 faces, how many faces do 3 cubes have in total? Answer:", # Basic Math/Logic
+        "A formal email to a professor requesting an extension on a deadline:", # Practical Writing
     ]
+
 
     print('\n=== Generated Emails ===\n')
     for prompt in prompts:
