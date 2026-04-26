@@ -8,8 +8,8 @@ config = {
     "n_latent_recursions": 6,  # n in paper (reduced for memory)
     "n_improvement_cycles": 2,  # T in paper (reduced for memory)
     # Training
-    "batch_size": 16,  # Reduced for MPS memory constraints
-    "gradient_accumulation_steps": 4,
+    "batch_size": 4,  # Reduced for MPS memory constraints
+    "gradient_accumulation_steps": 16,
     "epochs": 20,
     "lr": 1e-4,
     "warmup_steps": 500,

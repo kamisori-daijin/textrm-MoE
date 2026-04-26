@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from models.trm_build import RMSNorm, TransformerBlock
 
+
 class TinyRecursiveNetwork(nn.Module):
     """
     The core tiny network used in TRM.
@@ -79,14 +80,14 @@ class TinyRecursiveModel(nn.Module):
         return self.token_emb(input_ids[:, :T]) + self.pos_emb(pos)
 
     def latent_recursion(self, x, y, z):
-        """Update z recursively, then update prediction y."""
-        for _ in range(self.n_latent_recursions):
-            combined = self.combine_xyz(torch.cat([x, y, z], dim=-1))
-            z = self.net(combined)
-
-        combined_yz = self.combine_yz(torch.cat([y, z], dim=-1))
-        y = self.net(combined_yz)
-        return y, z
+            """Update z recursively, then update prediction y."""
+            for _ in range(self.n_latent_recursions):
+                combined = self.combine_xyz(torch.cat([x, y, z], dim=-1))
+                z = self.net(combined)
+    
+            combined_yz = self.combine_yz(torch.cat([y, z], dim=-1))
+            y = self.net(combined_yz)
+            return y, z
 
     def deep_recursion(self, x, y, z, use_grad=True):
         """Perform T cycles of improvement."""
