@@ -1,9 +1,9 @@
 from torch.utils.data import DataLoader
 import torch
+import gc
 from models.config import config
 from dataset.dataset import get_binary_datasets
-from training.instantiate import tokenizer, device, model
-from training.trainer import train
+from training.instantiate import tokenizer, device
 from ema.ema import EMA
 
 
@@ -16,7 +16,17 @@ if __name__ == '__main__':
             max_samples=config['max_train_samples'] + config['max_val_samples'],
             val_ratio=config['max_val_samples'] / (config['max_train_samples'] + config['max_val_samples'])
     )
-
+   
+    
+    
+    gc.collect()
+    
+    if torch.backends.mps.is_available():
+        torch.mps.empty_cache()
+    print("Memory cleaned. Now loading model...")    
+    from training.instantiate import model
+    from training.trainer import train
+    
     train_loader = DataLoader(
         train_dataset,
         batch_size=config['batch_size'],

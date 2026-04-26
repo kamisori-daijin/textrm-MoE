@@ -3,7 +3,6 @@ import torch
 import numpy as np
 from torch.utils.data import IterableDataset
 from .prepare_binary_dataset import prepare_binary_data
-from training.instantiate import tokenizer
 
 class BinaryPackedDataset(IterableDataset):
     def __init__(self, bin_file, max_length=512):

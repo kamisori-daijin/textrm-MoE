@@ -2,6 +2,7 @@ import os
 import numpy as np
 from datasets import load_dataset, interleave_datasets
 from tqdm import tqdm
+import gc
 
 def prepare_binary_data(tokenizer, output_filename, max_samples=300000):
     # --- Folder Setup ---
@@ -11,6 +12,10 @@ def prepare_binary_data(tokenizer, output_filename, max_samples=300000):
     
     # Combine directory and filename
     output_path = os.path.join(output_dir, output_filename)
+    
+    if os.path.exists(output_path):
+        print(f"Skipping: {output_path} already exists.")
+        return output_path
     
     # --- Load stream ---
     ds_cosmo = load_dataset("HuggingFaceTB/smollm-corpus", "cosmopedia-v2", split="train", streaming=True)
@@ -42,12 +47,19 @@ def prepare_binary_data(tokenizer, output_filename, max_samples=300000):
             if not ids or ids[-1] != tokenizer.eos_token_id:
                 ids.append(tokenizer.eos_token_id)
             
+            
             # Convert to uint16 (2 bytes per token)
             bin_ids = np.array(ids, dtype=np.uint16)
             f.write(bin_ids.tobytes())
             
+            del ids
+            
             count += 1
             pbar.update(1)
+            
+            if count % 500 == 0:
+                gc.collect()
+            
             
     print(f"\nExport completed! Check your file at: {output_path}")
     return output_path
