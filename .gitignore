@@ -21,3 +21,6 @@ textrm-2.0-tokenizer/
 chekpoint1.0/
 checkpoints2.0/
 checkpoints1.5/
+
+# Dataset Binaries
+*.bin
