@@ -1,12 +1,30 @@
-from torch.utils.data import DataLoader
-import torch
-import gc
+import mlx.core as mx
+import numpy as np
 from models.config import config
 from dataset.dataset import get_binary_datasets
-from training.instantiate import tokenizer, device
-from ema.ema import EMA
+from training.instantiate import tokenizer
+from training.trainer import train
+from training.instantiate import model
 
 
+# --- 💡 Fast DataLoader Alternative for MLX ---
+def get_batches(dataset, batch_size, shuffle=False):
+    """Simple generator to yield batches from dataset for MLX."""
+    indices = np.arange(len(dataset))
+    if shuffle:
+        np.random.shuffle(indices)
+        
+    for i in range(0, len(dataset), batch_size):
+        batch_idx = indices[i:i + batch_size]
+        
+       
+        samples = [dataset[int(idx)] for idx in batch_idx]
+        
+       
+        input_ids = mx.array([s[0] for s in samples])
+        targets = mx.array([s[1] for s in samples])
+        
+        yield input_ids, targets
 
 if __name__ == '__main__':
     # Load and pack dataset once, then split
@@ -17,36 +35,21 @@ if __name__ == '__main__':
             val_ratio=config['max_val_samples'] / (config['max_train_samples'] + config['max_val_samples'])
     )
    
+    print("Dataset loaded. Now training model...")    
     
     
-    gc.collect()
-    
-    if torch.backends.mps.is_available():
-        torch.mps.empty_cache()
-    print("Memory cleaned. Now loading model...")    
-    from training.instantiate import model
-    from training.trainer import train
-    
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config['batch_size'],
-        num_workers=0,
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=config['batch_size'],
-        num_workers=0,
-    )
+    train_loader_factory = lambda: get_batches(train_dataset, config['batch_size'], shuffle=True)
+    val_loader_factory = lambda: get_batches(val_dataset, config['batch_size'], shuffle=False)
 
-    #Training
-    save_path = 'best_model.pt' # Path to save the best model
+    # Training
+    save_path = 'best_model.safetensors'
    
+    
     model = train(
         model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
+        train_loader=train_loader_factory, 
+        val_loader=val_loader_factory,
         tokenizer=tokenizer,
-        device=device,
         epochs=config['epochs'],
         lr=config['lr'],
         warmup_steps=config['warmup_steps'],
@@ -56,31 +59,27 @@ if __name__ == '__main__':
     )
     
     print('\nTraining complete!')
-    torch.save({
-        "epoch": config['epochs'],
-        "model_state_dict": model.state_dict(),
-    }, 'final_model.pt')
-    print('Saved final model to final_model.pt')
+    
+    final_path = 'final_model.safetensors'
+    model.save_weights(final_path)
+    print(f'Saved final model to {final_path}')
 
-
-    # test Generation
-    model.eval()
-    ema = EMA(model)
-
-        
+    # Test Generation
     prompts = [
-        "Explain why the sky looks blue during the day:", # General Science
-        "The following is a Python function for binary search:\ndef binary_search(arr, target):", # Code Completion
-        "Question: If a cube has 6 faces, how many faces do 3 cubes have in total? Answer:", # Basic Math/Logic
-        "A formal email to a professor requesting an extension on a deadline:", # Practical Writing
+        "Explain why the sky looks blue during the day:", 
+        "The following is a Python function for binary search:\ndef binary_search(arr, target):", 
+        "Question: If a cube has 6 faces, how many faces do 3 cubes have in total? Answer:", 
+        "A formal email to a professor requesting an extension on a deadline:", 
     ]
-
 
     print('\n=== Generated ===\n')
     for prompt in prompts:
-        prompt_ids = torch.tensor([tokenizer.encode(prompt)], device=device)
+        prompt_ids = mx.array([tokenizer.encode(prompt)])
         generated = model.generate(prompt_ids, max_new_tokens=150, temperature=0.8)
-        text = tokenizer.decode(generated[0].tolist())
+        
+        
+        text = tokenizer.decode(generated.tolist()[0])
+        
         print(f'Prompt: "{prompt}"')
-        print(f'Email: {text}\n')
+        print(f'Generated: {text}\n')
         print('-' * 50 + '\n')
