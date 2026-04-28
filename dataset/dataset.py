@@ -1,50 +1,68 @@
 import os
-import torch
 import numpy as np
-from torch.utils.data import IterableDataset
+import mlx.core as mx
 from .prepare_binary_dataset import prepare_binary_data
 
-class BinaryPackedDataset(IterableDataset):
-    def __init__(self, bin_file, max_length=512):
-        super().__init__()
-        self.max_length = max_length
-        
+class MLXBinaryDataLoader:
+    def __init__(self, bin_file, batch_size, max_length=512, shuffle=False):
         if not os.path.exists(bin_file):
-            raise FileNotFoundError(f"Binary file not found: {bin_file}. Run prepare_binary_data() first.")
+            raise FileNotFoundError(f"Binary file not found: {bin_file}.")
 
-        # Memory-map the binary file (uint16 = 2 bytes per token)
-        # This points to the SSD file without loading it into RAM.
+        
         self.data = np.memmap(bin_file, dtype=np.uint16, mode='r')
-        self.num_tokens = len(self.data)
-
-    def __len__(self):
-        # Calculate total possible chunks
-        return (self.num_tokens - 1) // self.max_length
+        self.max_length = max_length
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        
+        
+        self.num_samples = (len(self.data) - 1) // self.max_length
 
     def __iter__(self):
-        # High-speed sliding window over the memory-mapped file
-        for i in range(0, self.num_tokens - self.max_length - 1, self.max_length):
-            # Fetch chunk from SSD (OS handles pre-fetching automatically)
-            chunk = self.data[i : i + self.max_length + 1]
+        
+        indices = np.arange(self.num_samples)
+        if self.shuffle:
+            np.random.shuffle(indices)
             
-            # Convert to PyTorch tensor (int64 is required for most loss functions)
-            d = torch.from_numpy(chunk.astype(np.int64))
+        for i in range(0, self.num_samples, self.batch_size):
+            batch_idx = indices[i : i + self.batch_size]
             
-            # Yield (input, target)
-            yield d[:-1], d[1:]
+            input_batch = []
+            target_batch = []
+            
+            for idx in batch_idx:
+                start = idx * self.max_length
+                end = start + self.max_length + 1
+                
+                
+                chunk = self.data[start:end].astype(np.int32)
+                
+                input_batch.append(chunk[:-1])
+                target_batch.append(chunk[1:])
+                
+            # Stack into a single numpy array first for stability
+            input_batch = np.stack(input_batch)
+            target_batch = np.stack(target_batch)
+            
+            yield mx.array(input_batch), mx.array(target_batch)
 
-def get_binary_datasets(tokenizer,max_length=512,max_samples=300000, val_ratio=0.01,):
+    def __len__(self):
+        
+        import math
+        return math.ceil(self.num_samples / self.batch_size)
+
+
+def get_binary_datasets(tokenizer, max_length=512, max_samples=300000, val_ratio=0.01, batch_size=4):
     """
-    Load pre-processed binary datasets from the 'bin_dataset' folder.
+    Load pre-processed binary datasets and return MLX native loaders.
     """
-    
     val_size = int(max_samples * val_ratio)
     train_size = max_samples - val_size
     
     train_bin = prepare_binary_data(tokenizer, "train_data.bin", max_samples=train_size)
     val_bin = prepare_binary_data(tokenizer, "val_data.bin", max_samples=val_size)
     
-    train_ds = BinaryPackedDataset(train_bin, max_length=max_length)
-    val_ds = BinaryPackedDataset(val_bin, max_length=max_length)
     
-    return train_ds, val_ds
+    train_loader_factory = lambda: MLXBinaryDataLoader(train_bin, batch_size, max_length, shuffle=True)
+    val_loader_factory = lambda: MLXBinaryDataLoader(val_bin, batch_size, max_length, shuffle=False)
+    
+    return train_loader_factory, val_loader_factory

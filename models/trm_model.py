@@ -13,10 +13,12 @@ class TinyRecursiveNetwork(nn.Module):
         
         self.norm = RMSNorm(dim)
 
-    def __call__(self, x):
+    def __call__(self, x, training: bool = True):
+        total_aux_loss = mx.array(0.0)
         for layer in self.layers:
-            x = layer(x)
-        return self.norm(x)
+            x, aux_loss = layer(x, training=training)
+            total_aux_loss = total_aux_loss + aux_loss
+        return self.norm(x), total_aux_loss
 
 
 class TinyRecursiveModel(nn.Module):
@@ -81,31 +83,50 @@ class TinyRecursiveModel(nn.Module):
         
         return self.token_emb(input_ids[:, :T]) + self.pos_emb(pos)
 
-    def latent_recursion(self, x, y, z):
+    def latent_recursion(self, x, y, z, training: bool = True):
         """Update z recursively, then update prediction y."""
+        total_aux_loss = mx.array(0.0)
         for _ in range(self.n_latent_recursions):
-            combined = self.combine_xyz(mx.concatenate([x, y, z], axis=-1))
-            z = self.net(combined)
+            # 1. Concatenate xyz
+            combined_raw = mx.concatenate([x, y, z], axis=-1)
+            # 2. Project back to 'dim'
+            combined = self.combine_xyz(combined_raw)
+            # 3. Process with recursive net
+            z, aux_loss = self.net(combined, training=training)
+            
+            total_aux_loss = total_aux_loss + aux_loss
+            # Clear intermediates
+            del combined_raw, combined
         
-        combined_yz = self.combine_yz(mx.concatenate([y, z], axis=-1))
-        y = self.net(combined_yz)
+        # Final update for y
+        combined_yz_raw = mx.concatenate([y, z], axis=-1)
+        combined_yz = self.combine_yz(combined_yz_raw)
+        y, aux_loss = self.net(combined_yz, training=training)
         
-        return y, z
+        total_aux_loss = total_aux_loss + aux_loss
+        del combined_yz_raw, combined_yz
+        
+        return y, z, total_aux_loss
 
 
-    def deep_recursion(self, x, y, z, use_grad=True):
+    def deep_recursion(self, x, y, z, training: bool = True):
         """Perform T cycles of improvement."""
-        if not use_grad:
-            for _ in range(self.n_improvement_cycles):
-                y, z = self.latent_recursion(x, y, z)
-            y, z = self.latent_recursion(x, y, z)
-            return y, z, self.output_head(y), self.halt_head(mx.mean(y, axis=1))
+        total_aux_loss = mx.array(0.0)
+        for _ in range(self.n_improvement_cycles):
+            y, z, aux_loss = self.latent_recursion(x, y, z, training=training)
+            total_aux_loss = total_aux_loss + aux_loss
+            
+        y, z, aux_loss = self.latent_recursion(x, y, z, training=training)
+        total_aux_loss = total_aux_loss + aux_loss
+        
+        # Calculate heads outside recursion to save graph space
+        logits = self.output_head(y)
+        halt_logit = self.halt_head(mx.mean(y, axis=1))
+        
+        return y, z, logits, halt_logit, total_aux_loss
 
 
-    import mlx.core as mx
-    import mlx.nn as nn
-    
-    def __call__(self, input_ids, targets=None, n_supervision_steps=4):
+    def __call__(self, input_ids, targets=None, n_supervision_steps=4, training: bool = True):
         """Forward pass with Deep Supervision and MoE routing."""
         B, T = input_ids.shape
         T = min(T, self.max_seq_len)
@@ -119,15 +140,17 @@ class TinyRecursiveModel(nn.Module):
 
         if targets is None:
             # Inference Mode
-            y, z = self.deep_recursion(x, y, z, use_grad=False)
-            return self.output_head(y)
+            y, z, logits, halt_logit, aux_loss = self.deep_recursion(x, y, z, training=False)
+            return logits
 
         # Training Mode with Deep Supervision
         targets = targets[:, :T]
-        total_loss = 0.0
+        total_main_loss = 0.0
+        total_aux_loss = 0.0
 
         for _ in range(n_supervision_steps):
-            y, z, logits, halt_logit = self.deep_recursion(x, y, z, use_grad=True)
+            y, z, logits, halt_logit, step_aux_loss = self.deep_recursion(x, y, z, training=training)
+            total_aux_loss = total_aux_loss + step_aux_loss
 
             ce_loss_raw = nn.losses.cross_entropy(
                 logits.reshape(-1, self.vocab_size),
@@ -137,9 +160,10 @@ class TinyRecursiveModel(nn.Module):
             mask = (targets.reshape(-1) != -100)
             ce_loss = mx.mean(ce_loss_raw * mask)
 
-           
-            preds = mx.argmax(logits, axis=-1)
-            correct = mx.sum((preds == targets) * mask) / mx.maximum(mx.sum(mask), 1)
+            # Flatten preds and targets for matching the mask shape
+            preds = mx.argmax(logits, axis=-1).reshape(-1)
+            flat_targets = targets.reshape(-1)
+            correct = mx.sum((preds == flat_targets) * mask) / mx.maximum(mx.sum(mask), 1)
 
             
             halt_loss = nn.losses.binary_cross_entropy(
@@ -148,26 +172,23 @@ class TinyRecursiveModel(nn.Module):
                 with_logits=True
             )
 
-            total_loss = total_loss + ce_loss + 0.1 * halt_loss
+            total_main_loss = total_main_loss + ce_loss + 0.1 * halt_loss
 
-        return total_loss / n_supervision_steps
+        return total_main_loss / n_supervision_steps, total_aux_loss / n_supervision_steps
 
 
-    
-    
     def generate(self, input_ids, max_new_tokens=50, temperature=0.8, top_k=40):
-        self.eval() 
         for _ in range(max_new_tokens):
             idx_cond = input_ids[:, -(self.max_seq_len - 1):]
-            logits = self(idx_cond)
+            logits = self(idx_cond, training=False)
             logits = logits[:, -1, :] / temperature
             if top_k is not None:
                 sorted_logits = mx.sort(logits, axis=-1)
                 k_th_value = sorted_logits[:, [-top_k]]
                 logits = mx.where(logits < k_th_value, float('-inf'), logits)
-                probs = mx.softmax(logits, axis=-1)
                 
-                next_token = mx.random.categorical(probs, axis=-1)[:, None]
-                input_ids = mx.concatenate([input_ids, next_token], axis=1)
+            probs = mx.softmax(logits, axis=-1)
+            next_token = mx.random.categorical(probs, axis=-1)[:, None]
+            input_ids = mx.concatenate([input_ids, next_token], axis=1)
         return input_ids
 

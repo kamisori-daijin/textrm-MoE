@@ -107,15 +107,15 @@ class TransformerBlock(nn.Module):
             shared_expert=True
         )
 
-    def __call__(self, x):
+    def __call__(self, x, training: bool = True):
         """
         Standard pre-norm residual connection.
-        The MoE layer internally handles routing and load balancing.
+        Returns a tuple of (output, aux_loss).
         """
-    
         x = x + self.attn(self.norm1(x))
         
-        # MoE sub-layer (Replaces static MLP)
-        x = x + self.moe(self.norm2(x))
+        # MoE sub-layer
+        moe_out, aux_loss = self.moe(self.norm2(x), training=training)
+        x = x + moe_out
         
-        return x
+        return x, aux_loss
