@@ -63,37 +63,40 @@ class MoELayer(nn.Module):
         if training:
             # density
             density = mx.mean(probs, axis=0)
-            # usage: Use one_hot to create a differentiable path
-            # Usage calculation represented by the one with the highest probability (the last row) of top_k
-            usage = mx.mean(mx.one_hot(top_k_indices[:, -1], self.num_experts), axis=0)
+        
+            
+            target_indices = top_k_indices[:, -1]
+            
+            
+            one_hot_usage = (target_indices[:, None] == mx.arange(self.num_experts))
+            
+           
+            usage = mx.mean(one_hot_usage.astype(mx.float32), axis=0)
+            
+            
             aux_loss = mx.sum(density * usage) * self.num_experts
+
 
         # 4. Expert Execution 
         final_flat_output = mx.zeros_like(x_flat)
         
         # For each expert, extract and calculate only the target tokens
+      
+        
         for i, expert in enumerate(self.experts):
             
-            # mask shape: [B*T]
-            mask = mx.any(top_k_indices == i, axis=-1)
+            #is_current_expert = mx.any(top_k_indices == i, axis=-1, keepdims=True)
             
-            if mx.any(mask):
-                # Extract only the corresponding tokens (Sparse Execution)
-                selected_x = x_flat[mask]
-                expert_out = expert(selected_x)
+            expert_out = expert(x_flat)
+            
+            for k in range(self.top_k):
                 
-            
-                for k in range(self.top_k):
-                    
-                    k_mask = (top_k_indices[mask, k] == i)
-                    if mx.any(k_mask):
-                        
-                        w = top_k_probs[mask, k:k+1][k_mask]
-                        
-                        final_flat_output[mask] += mx.where(
-                            mx.expand_dims(k_mask, -1),
-                            expert_out * w,
-                            mx.zeros_like(expert_out)
-                        )
-
+                k_mask = (top_k_indices[:, k:k+1] == i)
+                
+                
+                w = top_k_probs[:, k:k+1]
+                safe_w = w * k_mask
+                
+                final_flat_output = final_flat_output + (expert_out * safe_w)
+                
         return shared_out + final_flat_output.reshape(B, T, C), aux_loss

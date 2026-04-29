@@ -3,7 +3,7 @@ import mlx.nn as nn
 from mlx.utils import tree_map
 
 class EMA:
-    """Exponential Moving Average for model weights in MLX"""
+    """Exponential Moving Average"""
     def __init__(self, model: nn.Module, decay: float = 0.999):
         self.model = model
         self.decay = decay
@@ -14,26 +14,27 @@ class EMA:
 
     def update(self):
         """
-        Calculates the moving average:
-        shadow = decay * shadow + (1 - decay) * current_param
+        Update the shadows with the current model parameters.
+        mx.lerp(p, s, decay) -> p * (1 - decay) + s * decay
         """
         current_params = self.model.parameters()
         
+      
         def _ema_update(s, p):
-            return self.decay * s + (1 - self.decay) * p
+           
+            return self.decay * s + (1.0 - self.decay) * p
             
         self.shadow = tree_map(_ema_update, self.shadow, current_params)
 
     def apply_shadow(self):
-        """Swaps the model's parameters with the EMA parameters."""
-        
-        
+        """Replace the model weights with EMA (shadow)."""
+       
         self.backup = tree_map(lambda x: mx.array(x), self.model.parameters())
-        
+       
         self.model.update(self.shadow)
 
     def restore(self):
-        """Restores the original parameters from the backup."""
+        """Restore the original weights from the backup."""
         if self.backup is not None:
             self.model.update(self.backup)
             self.backup = None

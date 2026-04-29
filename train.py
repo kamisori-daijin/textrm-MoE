@@ -50,15 +50,19 @@ if __name__ == '__main__':
     ]
 
     print('\n=== Generated ===\n')
+        
+    model.eval() 
+        
     for prompt in prompts:
-        prompt_ids = mx.array([tokenizer.encode(prompt)])
-        
-        
+            
+        prompt_ids = mx.array([tokenizer.encode(prompt)], dtype=mx.int32)
+            
+            
         generated = model.generate(prompt_ids, max_new_tokens=150, temperature=0.8)
-        
-        
-        text = tokenizer.decode(generated.tolist())
-        
+            
+            
+        full_text = tokenizer.decode(generated[0].tolist())
+            
         print(f'Prompt: "{prompt}"')
-        print(f'Generated: {text}\n')
+        print(f'Generated: {full_text}\n')
         print('-' * 50 + '\n')

@@ -2,7 +2,6 @@ import mlx.core as mx
 import mlx.nn as nn
 from models.trm_build import RMSNorm, TransformerBlock
 
-
 class TinyRecursiveNetwork(nn.Module):
     def __init__(self, dim, n_heads=8, n_layers=2, mlp_ratio=4, max_seq_len=512, num_experts=8):
         super().__init__()
@@ -10,7 +9,6 @@ class TinyRecursiveNetwork(nn.Module):
             TransformerBlock(dim, n_heads, mlp_ratio, max_seq_len, num_experts)
             for _ in range(n_layers)
         ]
-        
         self.norm = RMSNorm(dim)
 
     def __call__(self, x, training: bool = True):
@@ -20,20 +18,9 @@ class TinyRecursiveNetwork(nn.Module):
             total_aux_loss = total_aux_loss + aux_loss
         return self.norm(x), total_aux_loss
 
-
 class TinyRecursiveModel(nn.Module):
-    def __init__(
-        self,
-        vocab_size,
-        dim=256,
-        n_heads=8,
-        n_layers=3,
-        mlp_ratio=4,
-        max_seq_len=256,
-        n_latent_recursions=6,
-        n_improvement_cycles=3,
-        num_experts=4,
-    ):
+    def __init__(self, vocab_size, dim=256, n_heads=8, n_layers=3, mlp_ratio=4, 
+                 max_seq_len=256, n_latent_recursions=6, n_improvement_cycles=3, num_experts=4):
         super().__init__()
         self.dim = dim
         self.vocab_size = vocab_size
@@ -41,154 +28,99 @@ class TinyRecursiveModel(nn.Module):
         self.n_latent_recursions = n_latent_recursions
         self.n_improvement_cycles = n_improvement_cycles
 
-        # 1. Embeddings
         self.token_emb = nn.Embedding(vocab_size, dim)
         self.pos_emb = nn.Embedding(max_seq_len, dim)
-
-        # 2. Single recursive core
         self.net = TinyRecursiveNetwork(dim, n_heads, n_layers, mlp_ratio, max_seq_len, num_experts)
-
-        # 3. Projections for xyz interaction
+        
         self.combine_xyz = nn.Linear(dim * 3, dim, bias=False)
         self.combine_yz = nn.Linear(dim * 2, dim, bias=False)
-
-        
         self.output_head = nn.Linear(dim, vocab_size, bias=False)
         self.halt_head = nn.Linear(dim, 1, bias=False)
 
-        
+        # Learnable Initial State 
         self.y_init = mx.random.normal((1, 1, dim)) * 0.02
         self.z_init = mx.random.normal((1, 1, dim)) * 0.02
-
         
         self._init_weights()
 
     def _init_weights(self):
-        
         def init_linear_or_emb(path, m):
             if isinstance(m, (nn.Linear, nn.Embedding)):
-                
                 m.weight = mx.random.normal(m.weight.shape) * 0.02
-                
-        
         self.apply_to_modules(init_linear_or_emb)
 
-
-    def get_embeddings(self, input_ids):
-        B, T = input_ids.shape
-        T = min(T, self.max_seq_len)
-        
-        
-        pos = mx.arange(T)[None, :]  # shape: (1, T)
-        
-        return self.token_emb(input_ids[:, :T]) + self.pos_emb(pos)
-
     def latent_recursion(self, x, y, z, training: bool = True):
-        """Update z recursively, then update prediction y."""
         total_aux_loss = mx.array(0.0)
         for _ in range(self.n_latent_recursions):
-            # 1. Concatenate xyz
-            combined_raw = mx.concatenate([x, y, z], axis=-1)
-            # 2. Project back to 'dim'
-            combined = self.combine_xyz(combined_raw)
-            # 3. Process with recursive net
-            z, aux_loss = self.net(combined, training=training)
+            combined = self.combine_xyz(mx.concatenate([x, y, z], axis=-1))
+            z, aux = self.net(combined, training=training)
+            total_aux_loss = total_aux_loss + aux
             
-            total_aux_loss = total_aux_loss + aux_loss
-            # Clear intermediates
-            del combined_raw, combined
-        
-        # Final update for y
-        combined_yz_raw = mx.concatenate([y, z], axis=-1)
-        combined_yz = self.combine_yz(combined_yz_raw)
-        y, aux_loss = self.net(combined_yz, training=training)
-        
-        total_aux_loss = total_aux_loss + aux_loss
-        del combined_yz_raw, combined_yz
-        
+        combined_yz = self.combine_yz(mx.concatenate([y, z], axis=-1))
+        y, aux = self.net(combined_yz, training=training)
+        total_aux_loss = total_aux_loss + aux
         return y, z, total_aux_loss
 
-
     def deep_recursion(self, x, y, z, training: bool = True):
-        """Perform T cycles of improvement."""
         total_aux_loss = mx.array(0.0)
-        for _ in range(self.n_improvement_cycles):
-            y, z, aux_loss = self.latent_recursion(x, y, z, training=training)
-            total_aux_loss = total_aux_loss + aux_loss
+        
+        if not training:
             
-        y, z, aux_loss = self.latent_recursion(x, y, z, training=training)
-        total_aux_loss = total_aux_loss + aux_loss
-        
-        # Calculate heads outside recursion to save graph space
-        logits = self.output_head(y)
-        halt_logit = self.halt_head(mx.mean(y, axis=1))
-        
-        return y, z, logits, halt_logit, total_aux_loss
+            for _ in range(self.n_improvement_cycles):
+                y, z, aux = self.latent_recursion(x, y, z, training=False)
+            return y, z, self.output_head(y), self.halt_head(mx.mean(y, axis=1)), total_aux_loss
 
+       
+        for _ in range(self.n_improvement_cycles - 1):
+            y, z, aux = self.latent_recursion(x, y, z, training=training)
+            y = mx.stop_gradient(y)
+            z = mx.stop_gradient(z)
+            
+            total_aux_loss = total_aux_loss + aux
+
+       
+        y, z, aux = self.latent_recursion(x, y, z, training=training)
+        total_aux_loss = total_aux_loss + aux
+        
+        return y, z, self.output_head(y), self.halt_head(mx.mean(y, axis=1)), total_aux_loss
 
     def __call__(self, input_ids, targets=None, n_supervision_steps=4, training: bool = True):
-        """Forward pass with Deep Supervision and MoE routing."""
         B, T = input_ids.shape
         T = min(T, self.max_seq_len)
-        input_ids = input_ids[:, :T]
-
-        x = self.get_embeddings(input_ids)
+        x = self.token_emb(input_ids[:, :T]) + self.pos_emb(mx.arange(T)[None, :])
         
-       
         y = mx.broadcast_to(self.y_init, (B, T, self.dim))
         z = mx.broadcast_to(self.z_init, (B, T, self.dim))
 
         if targets is None:
-            # Inference Mode
-            y, z, logits, halt_logit, aux_loss = self.deep_recursion(x, y, z, training=False)
+            y, z, logits, _, _ = self.deep_recursion(x, y, z, training=False)
             return logits
 
-        # Training Mode with Deep Supervision
+        total_main_loss = mx.array(0.0)
+        total_aux_loss = mx.array(0.0)
         targets = targets[:, :T]
-        total_main_loss = 0.0
-        total_aux_loss = 0.0
 
         for _ in range(n_supervision_steps):
-            y, z, logits, halt_logit, step_aux_loss = self.deep_recursion(x, y, z, training=training)
-            total_aux_loss = total_aux_loss + step_aux_loss
-
-            ce_loss_raw = nn.losses.cross_entropy(
-                logits.reshape(-1, self.vocab_size),
-                targets.reshape(-1),
-                reduction="none"
-            )
-            mask = (targets.reshape(-1) != -100)
-            ce_loss = mx.mean(ce_loss_raw * mask)
-
-            # Flatten preds and targets for matching the mask shape
-            preds = mx.argmax(logits, axis=-1).reshape(-1)
-            flat_targets = targets.reshape(-1)
-            correct = mx.sum((preds == flat_targets) * mask) / mx.maximum(mx.sum(mask), 1)
-
+            y, z, logits, halt_logit, step_aux = self.deep_recursion(x, y, z, training=training)
             
-            halt_loss = nn.losses.binary_cross_entropy(
-                mx.squeeze(halt_logit, -1),
-                mx.broadcast_to(correct, (B,)),
-                with_logits=True
-            )
+            # Cross Entropy
+            ce_loss = mx.mean(nn.losses.cross_entropy(logits, targets))
+            
+            # Accuracy-based Halt 
+            preds = mx.argmax(logits, axis=-1)
+            mask = (targets != -100)
+            correct = mx.sum((preds == targets) * mask) / mx.maximum(mx.sum(mask), 1)
+            
+            target_halt = mx.stop_gradient(mx.broadcast_to(correct, (B,)))
+            
+            halt_loss = mx.mean(nn.losses.binary_cross_entropy(
+                mx.squeeze(halt_logit, -1), target_halt, with_logits=True
+            ))
 
             total_main_loss = total_main_loss + ce_loss + 0.1 * halt_loss
+            total_aux_loss = total_aux_loss + step_aux
+            
+            
+            y, z = mx.stop_gradient(y), mx.stop_gradient(z)
 
         return total_main_loss / n_supervision_steps, total_aux_loss / n_supervision_steps
-
-
-    def generate(self, input_ids, max_new_tokens=50, temperature=0.8, top_k=40):
-        for _ in range(max_new_tokens):
-            idx_cond = input_ids[:, -(self.max_seq_len - 1):]
-            logits = self(idx_cond, training=False)
-            logits = logits[:, -1, :] / temperature
-            if top_k is not None:
-                sorted_logits = mx.sort(logits, axis=-1)
-                k_th_value = sorted_logits[:, [-top_k]]
-                logits = mx.where(logits < k_th_value, float('-inf'), logits)
-                
-            probs = mx.softmax(logits, axis=-1)
-            next_token = mx.random.categorical(probs, axis=-1)[:, None]
-            input_ids = mx.concatenate([input_ids, next_token], axis=1)
-        return input_ids
-
