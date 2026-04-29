@@ -41,25 +41,26 @@ def train(
 
     #@mx.compile
     def train_step(batch_list):
-        # Complete gradient accumulation within the compile timeframe.
-        acc_grads = None
-        acc_loss = mx.array(0.0)
-        n = len(batch_list)
+    acc_grads = None
+    
+    acc_loss, acc_main, acc_aux = mx.array(0.0), mx.array(0.0), mx.array(0.0)
+    n = len(batch_list)
         
-        for input_ids, targets in batch_list:
-            loss, grads = grad_fn(model, input_ids, targets)
-            acc_loss = acc_loss + (loss / n)
-            if acc_grads is None:
-                acc_grads = grads
-            else:
-                # Add gradients for all parameters
-                acc_grads = tree_map(lambda g1, g2: g1 + g2, acc_grads, grads)
-        
+    for input_ids, targets in batch_list:
+            
+        (loss, (m_loss, a_loss)), grads = grad_fn(model, input_ids, targets)
+        acc_loss += loss / n
+        acc_main += m_loss / n
+        acc_aux += a_loss / n
+            
+        if acc_grads is None: acc_grads = grads
+        else: acc_grads = tree_map(lambda g1, g2: g1 + g2, acc_grads, grads)
         
         acc_grads, _ = optim.clip_grad_norm(acc_grads, 1.0)
-        
         optimizer.update(model, acc_grads)
-        return acc_loss
+        
+        return mx.stack([acc_loss, acc_main, acc_aux])
+
 
     # ============================================================================
     # Training Loop
@@ -76,22 +77,31 @@ def train(
             current_batches.append((input_ids, targets))
                 
             if len(current_batches) == gradient_accumulation_steps:
-                   
-                loss = train_step(current_batches)   
+                losses = train_step(current_batches)   
                 ema.update()
+                
+                
+                if i % 10 == 0:
                     
-                mx.eval(loss, model.parameters(), ema.shadow, optimizer.state)
-                                
-                mx.metal.clear_cache() 
-                                
-                                
-                pbar.set_postfix({
-                    "loss": f"{loss.item():.4f}",
-                    "lr": f"{optimizer.learning_rate.item():.6f}"
-                })
+                    mx.eval(losses) 
                     
-                pbar.update(1)
+                    l_vals = losses.tolist()
+                    pbar.set_postfix({
+                        "loss": f"{l_vals[0]:.4f}",
+                        "main": f"{l_vals[1]:.4f}",
+                        "aux": f"{l_vals[2]:.4f}",
+                        "lr": f"{optimizer.learning_rate.item():.6f}"
+                    })
+                    pbar.update(10)
+                else:
+                    
+                    pass
+
                 current_batches = []
+                
+                if i % 100 == 0:
+                    mx.metal.clear_cache()
+
 
         # ============================================================================
         # 4. Validation (Apply EMA)
