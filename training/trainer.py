@@ -28,38 +28,37 @@ def train(
     
     ema = EMA(model, decay=ema_decay)
 
-    # 2. Defining the loss function (integrating aux_loss calculated on the Model side)
-    def loss_fn(model, input_ids, targets):
-        main_loss, aux_loss = model(
-            input_ids, targets, n_supervision_steps=n_supervision_steps, training=True
-        )
-        
-        return main_loss + aux_loss_coef * aux_loss
+    state = [model.state, optimizer.state]
 
-    # 3. Gradient calculation and compilation
-    grad_fn = nn.value_and_grad(model, loss_fn)
-
-    #@mx.compile
-    def train_step(batch_list):
-    acc_grads = None
+    @partial(mx.compile, inputs=state, outputs=state)
+    def train_step(batch_list): 
     
-    acc_loss, acc_main, acc_aux = mx.array(0.0), mx.array(0.0), mx.array(0.0)
-    n = len(batch_list)
+        def loss_fn(m, x, y):
+            main, aux = m(x, y, n_supervision_steps=n_supervision_steps, training=True)
+            return main + aux_loss_coef * aux
+
+
+        grad_fn = nn.value_and_grad(model, loss_fn)
+    
+        acc_grads = None
+        total_loss = mx.array(0.0)
+        n = len(batch_list)    
+
+    
+        for input_ids, targets in batch_list:
+            loss, grads = grad_fn(model, input_ids, targets)
+            total_loss += loss / n
         
-    for input_ids, targets in batch_list:
-            
-        (loss, (m_loss, a_loss)), grads = grad_fn(model, input_ids, targets)
-        acc_loss += loss / n
-        acc_main += m_loss / n
-        acc_aux += a_loss / n
-            
-        if acc_grads is None: acc_grads = grads
-        else: acc_grads = tree_map(lambda g1, g2: g1 + g2, acc_grads, grads)
-        
+            if acc_grads is None:
+                acc_grads = grads
+            else:
+                acc_grads = tree_map(lambda g1, g2: g1 + g2, acc_grads, grads)
+
+    
         acc_grads, _ = optim.clip_grad_norm(acc_grads, 1.0)
         optimizer.update(model, acc_grads)
-        
-        return mx.stack([acc_loss, acc_main, acc_aux])
+    
+        return total_loss
 
 
     # ============================================================================
@@ -71,36 +70,30 @@ def train(
         model.train()
             
         pbar = tqdm(desc=f"Epoch {epoch + 1}/{epochs}", unit="step")
-            
         current_batches = []
+        
         for i, (input_ids, targets) in enumerate(train_loader()):
             current_batches.append((input_ids, targets))
-                
+            
+            pbar.update(1) 
+            
             if len(current_batches) == gradient_accumulation_steps:
-                losses = train_step(current_batches)   
-                ema.update()
+                
+                loss = train_step(current_batches)
+                
+            
+                mx.eval(state, loss) 
                 
                 
-                if i % 10 == 0:
-                    
-                    mx.eval(losses) 
-                    
-                    l_vals = losses.tolist()
+                if i % (gradient_accumulation_steps * 10) == 0:
                     pbar.set_postfix({
-                        "loss": f"{l_vals[0]:.4f}",
-                        "main": f"{l_vals[1]:.4f}",
-                        "aux": f"{l_vals[2]:.4f}",
+                        "loss": f"{loss.item():.4f}",
                         "lr": f"{optimizer.learning_rate.item():.6f}"
                     })
-                    pbar.update(10)
-                else:
-                    
-                    pass
-
-                current_batches = []
                 
-                if i % 100 == 0:
-                    mx.metal.clear_cache()
+                current_batches = []
+                mx.metal.clear_cache()
+
 
 
         # ============================================================================
