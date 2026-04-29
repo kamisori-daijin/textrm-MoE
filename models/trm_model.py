@@ -51,14 +51,25 @@ class TinyRecursiveModel(nn.Module):
 
     def latent_recursion(self, x, y, z, training: bool = True):
         total_aux_loss = mx.array(0.0)
-        for _ in range(self.n_latent_recursions):
-            combined = self.combine_xyz(mx.concatenate([x, y, z], axis=-1))
-            z, aux = self.net(combined, training=training)
-            total_aux_loss = total_aux_loss + aux
             
-        combined_yz = self.combine_yz(mx.concatenate([y, z], axis=-1))
-        y, aux = self.net(combined_yz, training=training)
-        total_aux_loss = total_aux_loss + aux
+          
+        def one_step(x_in, y_in, z_in):
+            
+            combined = self.combine_xyz(mx.concatenate([x_in, y_in, z_in], axis=-1))
+            new_z, aux_z = self.net(combined, training=training)
+                
+                
+            combined_yz = self.combine_yz(mx.concatenate([y_in, new_z], axis=-1))
+            new_y, aux_y = self.net(combined_yz, training=training)
+                
+            return new_y, new_z, aux_z + aux_y
+    
+         
+        for _ in range(self.n_latent_recursions):
+               
+            y, z, aux = mx.checkpoint(one_step)(x, y, z)
+            total_aux_loss = total_aux_loss + aux
+                
         return y, z, total_aux_loss
 
     def deep_recursion(self, x, y, z, training: bool = True):

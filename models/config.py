@@ -5,11 +5,11 @@ config = {
     "n_layers": 4,  # Only 4 layers
     "mlp_ratio": 4,
     "max_seq_len": 512,  
-    "n_latent_recursions": 6,  
-    "n_improvement_cycles": 3,  
+    "n_latent_recursions": 5,  
+    "n_improvement_cycles": 2,  
     # Training
-    "batch_size": 16,  # Increased from 1 to improve GPU utilization
-    "gradient_accumulation_steps": 4, # Total effective batch = 64
+    "batch_size": 4,  # Increased from 1 to improve GPU utilization
+    "gradient_accumulation_steps": 16, # Total effective batch = 64
     "epochs": 20,
     "lr": 1e-4,
     "warmup_steps": 500,

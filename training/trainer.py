@@ -39,7 +39,7 @@ def train(
     # 3. Gradient calculation and compilation
     grad_fn = nn.value_and_grad(model, loss_fn)
 
-    @mx.compile
+    #@mx.compile
     def train_step(batch_list):
         # Complete gradient accumulation within the compile timeframe.
         acc_grads = None
@@ -68,27 +68,28 @@ def train(
     
     for epoch in range(epochs):
         model.train()
+            
         pbar = tqdm(desc=f"Epoch {epoch + 1}/{epochs}", unit="step")
-        
+            
         current_batches = []
         for i, (input_ids, targets) in enumerate(train_loader()):
             current_batches.append((input_ids, targets))
-            
+                
             if len(current_batches) == gradient_accumulation_steps:
-                
-                loss = train_step(current_batches)
-                
-                
+                   
+                loss = train_step(current_batches)   
                 ema.update()
-                
-               
-                if i % (10 * gradient_accumulation_steps) == 0:
-                    mx.eval(model.parameters(), optimizer.state, loss)
-                    pbar.set_postfix({
-                        "loss": f"{loss.item():.4f}",
-                        "lr": f"{optimizer.learning_rate.item():.6f}"
-                    })
-                
+                    
+                mx.eval(loss, model.parameters(), ema.shadow, optimizer.state)
+                                
+                mx.metal.clear_cache() 
+                                
+                                
+                pbar.set_postfix({
+                    "loss": f"{loss.item():.4f}",
+                    "lr": f"{optimizer.learning_rate.item():.6f}"
+                })
+                    
                 pbar.update(1)
                 current_batches = []
 
