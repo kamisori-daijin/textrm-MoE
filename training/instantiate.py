@@ -1,13 +1,9 @@
-import torch
 from transformers import AutoTokenizer
 import os
 from models.trm_model import TinyRecursiveModel
 from models.config import config
+from mlx.utils import tree_flatten 
 
-
-
-device = torch.device('mps' if torch.backends.mps.is_available() else 'cpu')
-print(f'Using device: {device}')
 
 # Tokenizer
 model_id = "TinyLlama/TinyLlama_v1.1"
@@ -43,7 +39,8 @@ model = TinyRecursiveModel(
 )
 
 # Count parameters
-n_params = sum(p.numel() for p in model.parameters())
+n_params = sum(v.size for _, v in tree_flatten(model.parameters()))
+
 print(f'Model parameters: {n_params:,} ({n_params/1e6:.2f}M)')
 print(f'Effective depth per supervision step: {config["n_improvement_cycles"] * (config["n_latent_recursions"] + 1) * config["n_layers"]}')
      

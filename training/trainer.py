@@ -1,14 +1,19 @@
 import os
-import torch
+
+import mlx.core as mx
+import mlx.nn as nn
+import mlx.optimizers as optim
+from mlx.utils import tree_flatten
 from tqdm import tqdm
+
 from ema.ema import EMA
+
 
 def train(
     model,
     train_loader,
     val_loader,
     tokenizer,
-    device,
     epochs=20,
     lr=1e-4,
     warmup_steps=1000,
@@ -16,101 +21,127 @@ def train(
     gradient_accumulation_steps=1,
     ema_decay=0.999,
     aux_loss_coef=0.01,
-    save_path="textrm-model.pt",
+    save_path="textrm-model.safetensors",
 ):
-    """
-    Main training loop. 
-    Numerical values are passed from config.py via train.py.
-    """
-    model = model.to(device)
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=lr, betas=(0.9, 0.95), weight_decay=0.1
+
+    lr_schedule = optim.linear_schedule(0, lr, steps=warmup_steps)
+    optimizer = optim.AdamW(
+        learning_rate=lr_schedule, betas=(0.9, 0.95), weight_decay=0.1
     )
+
     ema = EMA(model, decay=ema_decay)
+    state = [model.state, optimizer.state]
 
-    # Scheduler setup
-    def lr_schedule(step):
-        if step < warmup_steps:
-            return step / warmup_steps
-        return 1.0
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_schedule)
+    @mx.compile
+    def _full_update_step(model_state, optimizer_state, x, y):
+        model.update(model_state)
+        optimizer.state.update(optimizer_state)
 
-    global_step = 0
+        params = model.trainable_parameters()
+
+        def loss_fn(params):
+            model.update(params)
+            main, aux = model(
+                x, y, n_supervision_steps=n_supervision_steps, training=True
+            )
+            loss = main + aux_loss_coef * aux
+            return loss.reshape([]), aux
+
+        loss_and_grad_fn = nn.value_and_grad(model, loss_fn)
+        (loss, aux), grads = loss_and_grad_fn(params)
+
+        grads, _ = optim.clip_grad_norm(grads, 1.0)
+        optimizer.update(model, grads)
+
+        return model.state, optimizer.state, loss, aux
+
+    def train_step(batch_list):
+        current_model_state = model.state
+        current_optim_state = optimizer.state
+
+        param_dtype = tree_flatten(model.parameters())[0][1].dtype
+        total_loss = mx.array(0.0, dtype=param_dtype)
+        total_aux = mx.array(0.0, dtype=param_dtype)
+
+        n = len(batch_list)
+        for x, y in batch_list:
+            x = x.astype(mx.int32)
+            y = y.astype(mx.int32)
+
+            current_model_state, current_optim_state, l, a = _full_update_step(
+                current_model_state, current_optim_state, x, y
+            )
+            total_loss = total_loss + l / n
+            total_aux = total_aux + a / n
+
+        model.update(current_model_state)
+        optimizer.state.update(current_optim_state)
+
+        return total_loss, total_aux
+
     best_val_loss = float("inf")
-
-    # Important: Reset gradients before the epoch loop
-    optimizer.zero_grad()
 
     for epoch in range(epochs):
         model.train()
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch + 1}/{epochs}")
-        
-        for i, (input_ids, targets) in enumerate(pbar):
-            input_ids, targets = input_ids.to(device), targets.to(device)
 
-            # Forward pass
-            main_loss = model(input_ids, targets, n_supervision_steps=n_supervision_steps)
-            
-            # Sum MoE auxiliary losses for all layers
-            total_aux_loss = sum(layer.moe.aux_loss for layer in model.net.layers)
-            
-            # Combine losses and scale by accumulation steps
-            loss = (main_loss + aux_loss_coef * total_aux_loss) / gradient_accumulation_steps
-            loss.backward()
+        train_loader_inst = train_loader()
+        total_steps = len(train_loader_inst) // gradient_accumulation_steps
+        pbar = tqdm(total=total_steps, desc=f"Epoch {epoch + 1}/{epochs}", unit="step")
+        current_batches = []
 
-            # Gradient Accumulation Step
-            if (i + 1) % gradient_accumulation_steps == 0 or (i + 1) == len(train_loader):
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
-                scheduler.step()
-                ema.update()
-                optimizer.zero_grad() # Crucial: reset after step
-                global_step += 1
+        for i, (input_ids, targets) in enumerate(train_loader_inst):
+            current_batches.append((input_ids, targets))
 
-            pbar.set_postfix({
-                "loss": f"{loss.item() * gradient_accumulation_steps:.4f}",
-                "aux": f"{total_aux_loss.item():.4f}",
-                "lr": f"{scheduler.get_last_lr()[0]:.6f}",
-            })
+            if len(current_batches) == gradient_accumulation_steps:
+                loss, aux = train_step(current_batches)
+                mx.eval(state, loss, aux)
 
-        # Validation Logic
+                pbar.update(1)
+                pbar.set_postfix(
+                    {
+                        "loss": f"{loss.item():.4f}",
+                        "aux": f"{aux.item():.6f}",
+                        "lr": f"{optimizer.learning_rate.item():.6f}",
+                    }
+                )
+
+                current_batches = []
+                mx.clear_cache()
+
+        pbar.close()
         ema.apply_shadow()
-        model.eval()
-        val_loss = 0.0
-        with torch.no_grad():
-            for input_ids, targets in tqdm(val_loader, desc="Validation"):
-                input_ids, targets = input_ids.to(device), targets.to(device)
-                v_main_loss = model(input_ids, targets, n_supervision_steps=n_supervision_steps)
-                v_aux_loss = sum(layer.moe.aux_loss for layer in model.net.layers)
-                val_loss += (v_main_loss + aux_loss_coef * v_aux_loss).item()
 
-        val_loss /= len(val_loader)
-        print(f"Epoch {epoch + 1} - Val Loss: {val_loss:.4f}")
+        val_loss, val_steps = 0.0, 0
+        for v_input, v_target in val_loader():
+            v_main, v_aux = model(
+                v_input,
+                v_target,
+                n_supervision_steps=n_supervision_steps,
+                training=False,
+            )
+            v_step_loss = v_main + aux_loss_coef * v_aux
+            val_loss += v_step_loss.item()
+            val_steps += 1
 
-        # Checkpoint Management
+        val_loss /= max(val_steps, 1)
+        print(f"Val Loss: {val_loss:.4f}")
+
         base, ext = os.path.splitext(save_path)
-        ckpt_path = f"{base}_epoch{epoch + 1:03d}_val{val_loss:.4f}{ext if ext else '.pt'}"
-        torch.save({
-            "model_state_dict": model.state_dict(),
-            "ema_shadow": ema.shadow,
-            "epoch": epoch,
-            "val_loss": val_loss,
-        }, ckpt_path)
+        if not ext:
+            ext = ".safetensors"
 
-        # Sample Generation
+        checkpoint_name = f"{base}_epoch{epoch + 1:03d}_val{val_loss:.4f}{ext}"
+        model.save_weights(checkpoint_name)
+        print(f"Checkpoint saved: {checkpoint_name}")
+
         test_prompt = "Write a polite refusal email"
-        test_ids = torch.tensor([tokenizer.encode(test_prompt)], device=device)
+        test_ids = mx.array([tokenizer.encode(test_prompt)])
         generated = model.generate(test_ids, max_new_tokens=50)
-        print(f"Sample: {tokenizer.decode(generated[0].tolist())[:150]}...\n")
+        print(f"Sample: {tokenizer.decode(generated[0].tolist())[:150]}\n")
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save({
-                "model_state_dict": model.state_dict(),
-                "ema_shadow": ema.shadow,
-                "epoch": epoch,
-                "val_loss": val_loss,
-            }, save_path)
+            model.save_weights(save_path)
             print(f"Best model updated: {val_loss:.4f}")
 
         ema.restore()

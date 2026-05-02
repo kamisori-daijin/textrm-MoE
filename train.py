@@ -1,52 +1,31 @@
-from torch.utils.data import DataLoader
-import torch
-import gc
+import mlx.core as mx
 from models.config import config
 from dataset.dataset import get_binary_datasets
-from training.instantiate import tokenizer, device
-from ema.ema import EMA
-
-
+from training.instantiate import tokenizer
+from training.trainer import train
+from training.instantiate import model
 
 if __name__ == '__main__':
-    # Load and pack dataset once, then split
-    train_dataset, val_dataset = get_binary_datasets(
+    
+    train_loader_factory, val_loader_factory = get_binary_datasets(
             tokenizer=tokenizer,
             max_length=config['max_seq_len'],
             max_samples=config['max_train_samples'] + config['max_val_samples'],
-            val_ratio=config['max_val_samples'] / (config['max_train_samples'] + config['max_val_samples'])
+            val_ratio=config['max_val_samples'] / (config['max_train_samples'] + config['max_val_samples']),
+            batch_size=config['batch_size']  
     )
    
-    
-    
-    gc.collect()
-    
-    if torch.backends.mps.is_available():
-        torch.mps.empty_cache()
-    print("Memory cleaned. Now loading model...")    
-    from training.instantiate import model
-    from training.trainer import train
-    
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config['batch_size'],
-        num_workers=0,
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=config['batch_size'],
-        num_workers=0,
-    )
+    print("Dataset loaded. Now training model...")    
 
-    #Training
-    save_path = 'best_model.pt' # Path to save the best model
+    # Training
+    save_path = 'best_model.safetensors'
    
+    
     model = train(
         model=model,
-        train_loader=train_loader,
-        val_loader=val_loader,
+        train_loader=train_loader_factory, 
+        val_loader=val_loader_factory,
         tokenizer=tokenizer,
-        device=device,
         epochs=config['epochs'],
         lr=config['lr'],
         warmup_steps=config['warmup_steps'],
@@ -56,31 +35,34 @@ if __name__ == '__main__':
     )
     
     print('\nTraining complete!')
-    torch.save({
-        "epoch": config['epochs'],
-        "model_state_dict": model.state_dict(),
-    }, 'final_model.pt')
-    print('Saved final model to final_model.pt')
+    
+    # Standard weight saving in MLX
+    final_path = 'final_model.safetensors'
+    model.save_weights(final_path)
+    print(f'Saved final model to {final_path}')
 
-
-    # test Generation
-    model.eval()
-    ema = EMA(model)
-
-        
+    # Test Generation
     prompts = [
-        "Explain why the sky looks blue during the day:", # General Science
-        "The following is a Python function for binary search:\ndef binary_search(arr, target):", # Code Completion
-        "Question: If a cube has 6 faces, how many faces do 3 cubes have in total? Answer:", # Basic Math/Logic
-        "A formal email to a professor requesting an extension on a deadline:", # Practical Writing
+        "Explain why the sky looks blue during the day:", 
+        "The following is a Python function for binary search:\ndef binary_search(arr, target):", 
+        "Question: If a cube has 6 faces, how many faces do 3 cubes have in total? Answer:", 
+        "A formal email to a professor requesting an extension on a deadline:", 
     ]
 
-
     print('\n=== Generated ===\n')
+        
+    model.eval() 
+        
     for prompt in prompts:
-        prompt_ids = torch.tensor([tokenizer.encode(prompt)], device=device)
+            
+        prompt_ids = mx.array([tokenizer.encode(prompt)], dtype=mx.int32)
+            
+            
         generated = model.generate(prompt_ids, max_new_tokens=150, temperature=0.8)
-        text = tokenizer.decode(generated[0].tolist())
+            
+            
+        full_text = tokenizer.decode(generated[0].tolist())
+            
         print(f'Prompt: "{prompt}"')
-        print(f'Email: {text}\n')
+        print(f'Generated: {full_text}\n')
         print('-' * 50 + '\n')

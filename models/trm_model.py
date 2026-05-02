@@ -1,33 +1,29 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import mlx.core as mx
+import mlx.nn as nn
+
 from models.trm_build import RMSNorm, TransformerBlock
 
 
 class TinyRecursiveNetwork(nn.Module):
-    """
-    The core tiny network used in TRM.
-    Equipped with MoE layers that autonomously route tokens at each step.
-    """
-    def __init__(self, dim, n_heads=8, n_layers=2, mlp_ratio=4, max_seq_len=512, num_experts=8):
+    def __init__(
+        self, dim, n_heads=8, n_layers=2, mlp_ratio=4, max_seq_len=512, num_experts=8
+    ):
         super().__init__()
-        self.layers = nn.ModuleList([
+        self.layers = [
             TransformerBlock(dim, n_heads, mlp_ratio, max_seq_len, num_experts)
             for _ in range(n_layers)
-        ])
+        ]
         self.norm = RMSNorm(dim)
 
-    def forward(self, x):
+    def __call__(self, x, training: bool = True):
+        total_aux_loss = mx.array(0.0, dtype=x.dtype)
         for layer in self.layers:
-            x = layer(x)
-        return self.norm(x)
+            x, aux_loss = layer(x, training=training)
+            total_aux_loss = total_aux_loss + aux_loss
+        return self.norm(x), total_aux_loss
+
 
 class TinyRecursiveModel(nn.Module):
-    """
-    Tiny Recursive Model (textrm-MoE).
-    A single tiny network recursively refines latent representations.
-    MoE routing is performed dynamically during every recursion step.
-    """
     def __init__(
         self,
         vocab_size,
@@ -47,119 +43,121 @@ class TinyRecursiveModel(nn.Module):
         self.n_latent_recursions = n_latent_recursions
         self.n_improvement_cycles = n_improvement_cycles
 
-        # Embeddings
         self.token_emb = nn.Embedding(vocab_size, dim)
         self.pos_emb = nn.Embedding(max_seq_len, dim)
+        self.net = TinyRecursiveNetwork(
+            dim, n_heads, n_layers, mlp_ratio, max_seq_len, num_experts
+        )
 
-        # Single recursive core (The MoE-enabled network)
-        self.net = TinyRecursiveNetwork(dim, n_heads, n_layers, mlp_ratio, max_seq_len, num_experts)
-
-        # Projections for xyz interaction
         self.combine_xyz = nn.Linear(dim * 3, dim, bias=False)
         self.combine_yz = nn.Linear(dim * 2, dim, bias=False)
-
-        # Output & ACT-style halting heads
         self.output_head = nn.Linear(dim, vocab_size, bias=False)
         self.halt_head = nn.Linear(dim, 1, bias=False)
 
-        # Learnable initial states
-        self.y_init = nn.Parameter(torch.randn(1, 1, dim) * 0.02)
-        self.z_init = nn.Parameter(torch.randn(1, 1, dim) * 0.02)
+        # Learnable Initial State
+        self.y_init = mx.random.normal((1, 1, dim)) * 0.02
+        self.z_init = mx.random.normal((1, 1, dim)) * 0.02
 
         self._init_weights()
 
     def _init_weights(self):
-        for module in self.modules():
-            if isinstance(module, (nn.Linear, nn.Embedding)):
-                torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        def init_linear_or_emb(path, m):
+            if isinstance(m, (nn.Linear, nn.Embedding)):
+                m.weight = mx.random.normal(m.weight.shape) * 0.02
 
-    def get_embeddings(self, input_ids):
+        self.apply_to_modules(init_linear_or_emb)
+
+    def latent_recursion(self, x, y, z, training: bool = True):
+        total_aux_loss = mx.array(0.0, dtype=y.dtype)
+        for _ in range(self.n_latent_recursions):
+            combined = self.combine_xyz(mx.concatenate([x, y, z], axis=-1))
+            z, aux = self.net(combined, training=training)
+            total_aux_loss = total_aux_loss + aux
+
+        combined_yz = self.combine_yz(mx.concatenate([y, z], axis=-1))
+        y, aux = self.net(combined_yz, training=training)
+        total_aux_loss = total_aux_loss + aux
+        return y, z, total_aux_loss
+
+    def deep_recursion(self, x, y, z, training: bool = True):
+        total_aux_loss = mx.array(0.0, dtype=y.dtype)
+
+        if not training:
+            for _ in range(self.n_improvement_cycles):
+                y, z, aux = self.latent_recursion(x, y, z, training=False)
+            return (
+                y,
+                z,
+                self.output_head(y),
+                self.halt_head(mx.mean(y, axis=1)),
+                total_aux_loss,
+            )
+
+        for _ in range(self.n_improvement_cycles - 1):
+            y, z, aux = self.latent_recursion(x, y, z, training=training)
+            y = mx.stop_gradient(y)
+            z = mx.stop_gradient(z)
+
+            total_aux_loss = total_aux_loss + aux
+
+        y, z, aux = self.latent_recursion(x, y, z, training=training)
+        total_aux_loss = total_aux_loss + aux
+
+        return (
+            y,
+            z,
+            self.output_head(y),
+            self.halt_head(mx.mean(y, axis=1)),
+            total_aux_loss,
+        )
+
+    def __call__(
+        self, input_ids, targets=None, n_supervision_steps=4, training: bool = True
+    ):
         B, T = input_ids.shape
         T = min(T, self.max_seq_len)
-        pos = torch.arange(T, device=input_ids.device).unsqueeze(0)
-        return self.token_emb(input_ids[:, :T]) + self.pos_emb(pos)
+        x = self.token_emb(input_ids[:, :T]) + self.pos_emb(mx.arange(T)[None, :])
 
-    def latent_recursion(self, x, y, z):
-            """Update z recursively, then update prediction y."""
-            for _ in range(self.n_latent_recursions):
-                combined = self.combine_xyz(torch.cat([x, y, z], dim=-1))
-                z = self.net(combined)
-    
-            combined_yz = self.combine_yz(torch.cat([y, z], dim=-1))
-            y = self.net(combined_yz)
-            return y, z
-
-    def deep_recursion(self, x, y, z, use_grad=True):
-        """Perform T cycles of improvement."""
-        if not use_grad:
-            with torch.no_grad():
-                for _ in range(self.n_improvement_cycles):
-                    y, z = self.latent_recursion(x, y, z)
-            return y.detach(), z.detach()
-
-        # T-1 cycles without gradients for stability
-        with torch.no_grad():
-            for _ in range(self.n_improvement_cycles - 1):
-                y, z = self.latent_recursion(x, y, z)
-
-        # Last cycle with gradients
-        y, z = self.latent_recursion(x, y, z)
-        return y, z, self.output_head(y), self.halt_head(y.mean(dim=1))
-
-    def forward(self, input_ids, targets=None, n_supervision_steps=4):
-        """Forward pass with Deep Supervision and MoE routing."""
-        B, T = input_ids.shape
-        T = min(T, self.max_seq_len)
-        input_ids = input_ids[:, :T]
-
-        x = self.get_embeddings(input_ids)
-        y = self.y_init.expand(B, T, -1).clone()
-        z = self.z_init.expand(B, T, -1).clone()
+        y = mx.broadcast_to(self.y_init, (B, T, self.dim))
+        z = mx.broadcast_to(self.z_init, (B, T, self.dim))
 
         if targets is None:
-            # Inference Mode
-            y, z = self.deep_recursion(x, y, z, use_grad=False)
-            return self.output_head(y)
+            y, z, logits, _, _ = self.deep_recursion(x, y, z, training=False)
+            return logits
 
-        # Training Mode with Deep Supervision
+    
+        param_dtype = self.token_emb.weight.dtype
+        total_main_loss = mx.array(0.0, dtype=param_dtype)
+        total_aux_loss = mx.array(0.0, dtype=param_dtype)
         targets = targets[:, :T]
-        total_loss = 0.0
 
         for _ in range(n_supervision_steps):
-            y, z, logits, halt_logit = self.deep_recursion(x, y, z, use_grad=True)
-
-            ce_loss = F.cross_entropy(
-                logits.view(-1, self.vocab_size),
-                targets.reshape(-1),
-                ignore_index=-100
+            y, z, logits, halt_logit, step_aux = self.deep_recursion(
+                x, y, z, training=training
             )
 
-            # Accuracy-based halting loss (Simplified ACT)
-            with torch.no_grad():
-                preds = logits.argmax(dim=-1)
-                mask = (targets != -100)
-                correct = ((preds == targets) & mask).float().sum() / mask.float().sum().clamp(min=1)
-            
-            halt_loss = F.binary_cross_entropy_with_logits(
-                halt_logit.squeeze(-1),
-                correct.expand(B)
+            # Cross Entropy
+            ce_loss = mx.mean(nn.losses.cross_entropy(logits, targets))
+
+            # Accuracy-based Halt
+            preds = mx.argmax(logits, axis=-1)
+            mask = targets != -100
+            correct = mx.sum((preds == targets) * mask) / mx.maximum(mx.sum(mask), 1)
+
+            target_halt = mx.stop_gradient(mx.broadcast_to(correct, (B,)))
+
+            halt_loss = mx.mean(
+                nn.losses.binary_cross_entropy(
+                    mx.squeeze(halt_logit, -1), target_halt, with_logits=True
+                )
             )
 
-            total_loss = total_loss + ce_loss + 0.1 * halt_loss
+            total_main_loss = total_main_loss + ce_loss + 0.1 * halt_loss
+            total_aux_loss = total_aux_loss + step_aux
 
-        return total_loss / n_supervision_steps
+            y, z = mx.stop_gradient(y), mx.stop_gradient(z)
 
-    @torch.no_grad()
-    def generate(self, input_ids, max_new_tokens=50, temperature=0.8, top_k=40):
-        self.eval()
-        for _ in range(max_new_tokens):
-            idx_cond = input_ids[:, -(self.max_seq_len - 1):]
-            logits = self(idx_cond)
-            logits = logits[:, -1, :] / temperature
-            if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = float('-inf')
-            probs = F.softmax(logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)
-            input_ids = torch.cat([input_ids, next_token], dim=1)
-        return input_ids
+        return (
+            total_main_loss / n_supervision_steps,
+            total_aux_loss / n_supervision_steps,
+        )

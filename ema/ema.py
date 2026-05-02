@@ -1,41 +1,40 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
-from datasets import load_dataset
-from transformers import GPT2Tokenizer
-import math
-import os
-from tqdm import tqdm
-import copy
+import mlx.core as mx
+import mlx.nn as nn
+from mlx.utils import tree_map
 
 class EMA:
-    """Exponential Moving Average for model weights"""
-    def __init__(self, model, decay=0.999):
+    """Exponential Moving Average"""
+    def __init__(self, model: nn.Module, decay: float = 0.999):
         self.model = model
         self.decay = decay
-        self.shadow = {}
-        self.backup = {}
-
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                self.shadow[name] = param.data.clone()
+        
+       
+        self.shadow = tree_map(lambda x: mx.array(x), model.parameters())
+        self.backup = None
 
     def update(self):
-        for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                self.shadow[name] = (
-                    self.decay * self.shadow[name] +
-                    (1 - self.decay) * param.data
-                )
+        """
+        Update the shadows with the current model parameters.
+        mx.lerp(p, s, decay) -> p * (1 - decay) + s * decay
+        """
+        current_params = self.model.parameters()
+        
+      
+        def _ema_update(s, p):
+           
+            return self.decay * s + (1.0 - self.decay) * p
+            
+        self.shadow = tree_map(_ema_update, self.shadow, current_params)
 
     def apply_shadow(self):
-        for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                self.backup[name] = param.data.clone()
-                param.data = self.shadow[name]
+        """Replace the model weights with EMA (shadow)."""
+       
+        self.backup = tree_map(lambda x: mx.array(x), self.model.parameters())
+       
+        self.model.update(self.shadow)
 
     def restore(self):
-        for name, param in self.model.named_parameters():
-            if param.requires_grad:
-                param.data = self.backup[name]
+        """Restore the original weights from the backup."""
+        if self.backup is not None:
+            self.model.update(self.backup)
+            self.backup = None
