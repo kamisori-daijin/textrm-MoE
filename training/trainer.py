@@ -105,7 +105,7 @@ def train(
                 )
 
                 current_batches = []
-                mx.metal.clear_cache()
+                mx.clear_cache()
 
         pbar.close()
         ema.apply_shadow()
