@@ -1,5 +1,4 @@
 import os
-
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
