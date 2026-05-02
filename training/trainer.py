@@ -3,7 +3,7 @@ import os
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
-from mlx.utils import tree_flatten, tree_map
+from mlx.utils import tree_flatten
 from tqdm import tqdm
 
 from ema.ema import EMA
@@ -45,15 +45,15 @@ def train(
                 x, y, n_supervision_steps=n_supervision_steps, training=True
             )
             loss = main + aux_loss_coef * aux
-            return loss.reshape([])
+            return loss.reshape([]), aux
 
         loss_and_grad_fn = nn.value_and_grad(model, loss_fn)
-        loss, grads = loss_and_grad_fn(params)
+        (loss, aux), grads = loss_and_grad_fn(params)
 
         grads, _ = optim.clip_grad_norm(grads, 1.0)
         optimizer.update(model, grads)
 
-        return model.state, optimizer.state, loss
+        return model.state, optimizer.state, loss, aux
 
     def train_step(batch_list):
         current_model_state = model.state
@@ -61,21 +61,23 @@ def train(
 
         param_dtype = tree_flatten(model.parameters())[0][1].dtype
         total_loss = mx.array(0.0, dtype=param_dtype)
+        total_aux = mx.array(0.0, dtype=param_dtype)
 
         n = len(batch_list)
         for x, y in batch_list:
             x = x.astype(mx.int32)
             y = y.astype(mx.int32)
 
-            current_model_state, current_optim_state, l = _full_update_step(
+            current_model_state, current_optim_state, l, a = _full_update_step(
                 current_model_state, current_optim_state, x, y
             )
             total_loss = total_loss + l / n
+            total_aux = total_aux + a / n
 
         model.update(current_model_state)
         optimizer.state.update(current_optim_state)
 
-        return total_loss
+        return total_loss, total_aux
 
     best_val_loss = float("inf")
 
@@ -84,24 +86,24 @@ def train(
 
         pbar = tqdm(desc=f"Epoch {epoch + 1}/{epochs}", unit="step")
         current_batches = []
+        step_count = 0
 
         for i, (input_ids, targets) in enumerate(train_loader()):
             current_batches.append((input_ids, targets))
 
-            pbar.update(1)
-
             if len(current_batches) == gradient_accumulation_steps:
-                loss = train_step(current_batches)
+                loss, aux = train_step(current_batches)
+                mx.eval(state, loss, aux)
 
-                mx.eval(state, loss)
-
-                if i % (gradient_accumulation_steps * 10) == 0:
-                    pbar.set_postfix(
-                        {
-                            "loss": f"{loss.item():.4f}",
-                            "lr": f"{optimizer.learning_rate.item():.6f}",
-                        }
-                    )
+                step_count += 1
+                pbar.update(1)
+                pbar.set_postfix(
+                    {
+                        "loss": f"{loss.item():.4f}",
+                        "aux": f"{aux.item():.6f}",
+                        "lr": f"{optimizer.learning_rate.item():.6f}",
+                    }
+                )
 
                 current_batches = []
                 mx.metal.clear_cache()

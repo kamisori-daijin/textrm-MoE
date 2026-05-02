@@ -125,7 +125,7 @@ class TinyRecursiveModel(nn.Module):
             y, z, logits, _, _ = self.deep_recursion(x, y, z, training=False)
             return logits
 
-        # パラメータの dtype を取得して初期値を合わせる
+    
         param_dtype = self.token_emb.weight.dtype
         total_main_loss = mx.array(0.0, dtype=param_dtype)
         total_aux_loss = mx.array(0.0, dtype=param_dtype)
