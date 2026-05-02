@@ -1,4 +1,5 @@
 import os
+
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
@@ -83,18 +84,18 @@ def train(
     for epoch in range(epochs):
         model.train()
 
-        pbar = tqdm(desc=f"Epoch {epoch + 1}/{epochs}", unit="step")
+        train_loader_inst = train_loader()
+        total_steps = len(train_loader_inst) // gradient_accumulation_steps
+        pbar = tqdm(total=total_steps, desc=f"Epoch {epoch + 1}/{epochs}", unit="step")
         current_batches = []
-        step_count = 0
 
-        for i, (input_ids, targets) in enumerate(train_loader()):
+        for i, (input_ids, targets) in enumerate(train_loader_inst):
             current_batches.append((input_ids, targets))
 
             if len(current_batches) == gradient_accumulation_steps:
                 loss, aux = train_step(current_batches)
                 mx.eval(state, loss, aux)
 
-                step_count += 1
                 pbar.update(1)
                 pbar.set_postfix(
                     {
