@@ -1,10 +1,13 @@
 import os
+
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
-from mlx.utils import tree_map
+from mlx.utils import tree_flatten, tree_map
 from tqdm import tqdm
+
 from ema.ema import EMA
+
 
 def train(
     model,
@@ -20,126 +23,125 @@ def train(
     aux_loss_coef=0.01,
     save_path="textrm-model.safetensors",
 ):
-    
-    lr_schedule = optim.linear_schedule(0, lr, steps=warmup_steps)
-    optimizer = optim.AdamW(learning_rate=lr_schedule, betas=(0.9, 0.95), weight_decay=0.1)
-    
-    # Initialize EMA 
-    
-    ema = EMA(model, decay=ema_decay)
 
+    lr_schedule = optim.linear_schedule(0, lr, steps=warmup_steps)
+    optimizer = optim.AdamW(
+        learning_rate=lr_schedule, betas=(0.9, 0.95), weight_decay=0.1
+    )
+
+    ema = EMA(model, decay=ema_decay)
     state = [model.state, optimizer.state]
 
-    @partial(mx.compile, inputs=state, outputs=state)
-    def train_step(batch_list): 
-    
-        def loss_fn(m, x, y):
-            main, aux = m(x, y, n_supervision_steps=n_supervision_steps, training=True)
-            return main + aux_loss_coef * aux
+    @mx.compile
+    def _full_update_step(model_state, optimizer_state, x, y):
+        model.update(model_state)
+        optimizer.state.update(optimizer_state)
 
+        params = model.trainable_parameters()
 
-        grad_fn = nn.value_and_grad(model, loss_fn)
-    
-        acc_grads = None
-        total_loss = mx.array(0.0)
-        n = len(batch_list)    
+        def loss_fn(params):
+            model.update(params)
+            main, aux = model(
+                x, y, n_supervision_steps=n_supervision_steps, training=True
+            )
+            loss = main + aux_loss_coef * aux
+            return loss.reshape([])
 
-    
-        for input_ids, targets in batch_list:
-            loss, grads = grad_fn(model, input_ids, targets)
-            total_loss += loss / n
-        
-            if acc_grads is None:
-                acc_grads = grads
-            else:
-                acc_grads = tree_map(lambda g1, g2: g1 + g2, acc_grads, grads)
+        loss_and_grad_fn = nn.value_and_grad(model, loss_fn)
+        loss, grads = loss_and_grad_fn(params)
 
-    
-        acc_grads, _ = optim.clip_grad_norm(acc_grads, 1.0)
-        optimizer.update(model, acc_grads)
-    
+        grads, _ = optim.clip_grad_norm(grads, 1.0)
+        optimizer.update(model, grads)
+
+        return model.state, optimizer.state, loss
+
+    def train_step(batch_list):
+        current_model_state = model.state
+        current_optim_state = optimizer.state
+
+        param_dtype = tree_flatten(model.parameters())[0][1].dtype
+        total_loss = mx.array(0.0, dtype=param_dtype)
+
+        n = len(batch_list)
+        for x, y in batch_list:
+            x = x.astype(mx.int32)
+            y = y.astype(mx.int32)
+
+            current_model_state, current_optim_state, l = _full_update_step(
+                current_model_state, current_optim_state, x, y
+            )
+            total_loss = total_loss + l / n
+
+        model.update(current_model_state)
+        optimizer.state.update(current_optim_state)
+
         return total_loss
 
-
-    # ============================================================================
-    # Training Loop
-    # ============================================================================
     best_val_loss = float("inf")
-    
+
     for epoch in range(epochs):
         model.train()
-            
+
         pbar = tqdm(desc=f"Epoch {epoch + 1}/{epochs}", unit="step")
         current_batches = []
-        
+
         for i, (input_ids, targets) in enumerate(train_loader()):
             current_batches.append((input_ids, targets))
-            
-            pbar.update(1) 
-            
+
+            pbar.update(1)
+
             if len(current_batches) == gradient_accumulation_steps:
-                
                 loss = train_step(current_batches)
-                
-            
-                mx.eval(state, loss) 
-                
-                
+
+                mx.eval(state, loss)
+
                 if i % (gradient_accumulation_steps * 10) == 0:
-                    pbar.set_postfix({
-                        "loss": f"{loss.item():.4f}",
-                        "lr": f"{optimizer.learning_rate.item():.6f}"
-                    })
-                
+                    pbar.set_postfix(
+                        {
+                            "loss": f"{loss.item():.4f}",
+                            "lr": f"{optimizer.learning_rate.item():.6f}",
+                        }
+                    )
+
                 current_batches = []
                 mx.metal.clear_cache()
 
-
-
-        # ============================================================================
-        # 4. Validation (Apply EMA)
-        # ============================================================================
         pbar.close()
-        ema.apply_shadow() 
-        
+        ema.apply_shadow()
+
         val_loss, val_steps = 0.0, 0
         for v_input, v_target in val_loader():
-            
-            v_main, v_aux = model(v_input, v_target, n_supervision_steps=n_supervision_steps, training=False)
+            v_main, v_aux = model(
+                v_input,
+                v_target,
+                n_supervision_steps=n_supervision_steps,
+                training=False,
+            )
             v_step_loss = v_main + aux_loss_coef * v_aux
             val_loss += v_step_loss.item()
             val_steps += 1
-            
+
         val_loss /= max(val_steps, 1)
         print(f"Val Loss: {val_loss:.4f}")
 
-       
-       
         base, ext = os.path.splitext(save_path)
-        
         if not ext:
             ext = ".safetensors"
-                    
-        
+
         checkpoint_name = f"{base}_epoch{epoch + 1:03d}_val{val_loss:.4f}{ext}"
-                
-       
         model.save_weights(checkpoint_name)
         print(f"Checkpoint saved: {checkpoint_name}")
-        
-        
+
         test_prompt = "Write a polite refusal email"
         test_ids = mx.array([tokenizer.encode(test_prompt)])
         generated = model.generate(test_ids, max_new_tokens=50)
         print(f"Sample: {tokenizer.decode(generated[0].tolist())[:150]}\n")
-        
+
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            
             model.save_weights(save_path)
-            print(f"🌟 Best model updated: {val_loss:.4f}")
-        
-        
+            print(f"Best model updated: {val_loss:.4f}")
+
         ema.restore()
 
     return model
