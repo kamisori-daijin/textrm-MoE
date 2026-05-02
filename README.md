@@ -1,26 +1,21 @@
-# PyTorch Tiny Recursive Models (TRM)
+# MLX Tiny Recursive Models with Mixture of Experts (textrm-MoE)
 
-A simplified and efficient reimplementation of [TinyRecursiveModels](https://github.com/SamsungSAILMontreal/TinyRecursiveModels), optimized for memory-constrained environments and modern training techniques.
-
-Hugging Face:
-- [Kamisori-daijin/textrm-28M-bizmail](https://huggingface.co/Kamisori-daijin/textrm-28M-bizmail)
-- [Kamisori-daijin/textrm1.5-25M-bizmail](https://huggingface.co/Kamisori-daijin/textrm1.5-25M-bizmail)
-
-
+An efficient reimplementation of [TinyRecursiveModels](https://github.com/SamsungSAILMontreal/TinyRecursiveModels) using the [MLX](https://github.com/ml-explore/mlx) framework, enhanced with **Mixture of Experts (MoE)** and optimized for Apple Silicon.
 
 ## Key Features
 
-- **Recursive Latent Reasoning**: Implements the core TRM architecture where a single "tiny" network is reused across latent recursions (`n`) and improvement cycles (`T`).
-- **Deep Supervision**: Trains with intermediate losses across multiple refinement steps to ensure stable convergence.
-- **Efficient Packing Strategy**: 
-    - Multiple training examples are packed into fixed-length blocks (e.g., 256 tokens) with `</s>` separators.
-    - Zero padding: maximizes GPU throughput by ensuring every token in the batch is used for learning.
-- **Smart Loss Masking**: 
-    - The dataset automatically identifies the `<user>` prompt and masks it during training using `-100`.
-    - The model focuses exclusively on learning the reasoning process (`<think>...</think>`) and final output (`<generate>...</generate>`).
-- **Optimized Data Pipeline**: 
-    - Single-pass dataset loading and splitting from streaming sources.
-    - Reduced memory footprint and initialization time.
+- **MLX Native**: Built for high-performance inference and training on Apple Silicon.
+- **Recursive Latent Reasoning**: Implements the TRM architecture where a single "tiny" network is reused across latent recursions (`n`) and improvement cycles (`T`).
+- **Mixture of Experts (MoE)**:
+    - Integrated `MoELayer` with Top-k routing.
+    - Persistent **Shared Expert** for capturing general knowledge alongside specialized experts.
+    - Auxiliary loss for expert load balancing.
+- **Adaptive Computation**: Includes a `Halt Head` to learn optimal early-exit or accuracy-based termination.
+- **Efficient Binary Data Pipeline**: 
+    - Automated pre-tokenization and export to binary format (`.bin`).
+    - High-speed data loading using `np.memmap` for zero-copy memory access.
+- **Deep Supervision**: Multi-step intermediate losses ensure stable convergence of recursive layers.
+- **Modern Architecture**: Uses RoPE (Rotary Positional Embeddings), RMSNorm, and SwiGLU experts.
 
 ## Usage
 
@@ -28,65 +23,57 @@ Hugging Face:
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate  # MacOS/Linux
-# or .venv\Scripts\activate on Windows
-pip install -r requirements.txt 
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
 ### 2. Configure the Model
 
-Adjust hyperparameters in `models/config.py`. The defaults are tuned for stability on consumer hardware (e.g., Apple Silicon M-series).
+Adjust hyperparameters in `models/config.py`. The defaults are tuned for performance on M-series MacBooks.
 
 ```python
 config = {
-    "vocab_size": 32005,      # TinyLlama(32k) + Special Tokens
-    "dim": 512,               # Hidden dimension
-    "max_seq_len": 256,       # Sequence length
-    "n_latent_recursions": 4, # 'n' in the TRM paper
-    "n_improvement_cycles": 2,# 'T' in the TRM paper
-    "batch_size": 16,
-    "n_supervision_steps": 3, # Number of supervision steps
+    "vocab_size": 32005,
+    "dim": 1024,
+    "n_heads": 16,
+    "n_layers": 4,
+    "n_latent_recursions": 5,
+    "n_improvement_cycles": 2,
+    "num_experts": 8,
+    "max_seq_len": 512,
 }
 ```
 
 ### 3. Training
 
-Launch the training script. It will automatically download the dataset (streaming), pack it, and begin training with EMA (Exponential Moving Average) weights.
+Launch the training script. It will automatically download the required datasets (Cosmopedia, FineWeb, etc.), prepare binary caches, and begin training with EMA (Exponential Moving Average) weights.
 
 ```bash
-python train.py 
+python train.py
 ```
 
-### 4. Weights & Inference
+### 4. Inference
 
-Convert the PyTorch checkpoints to Safetensors for better compatibility:
-
-```bash
-python convert_to_safetensors.py
-```
-
-Run a simple generation test:
+Run generation tests using the trained weights (default: `final_model.safetensors`):
 
 ```bash
 python inference.py
 ```
 
-## Dataset Format
+## Dataset & Special Tokens
 
-The training pipeline expects a specific format to enable efficient masking:
+The model uses a TinyLlama-based tokenizer .
 
-```json
-{
-  "text": "<user>Prompt Here</user><think>Reasoning steps...</think><generate>Final output...</generate></s>"
-}
-```
-*Note: The model learns to generate everything after the `<user>` section.*
+Training data is automatically packed and masked .
 
 ## Acknowledgments
 
-- [SamsungSAILMontreal/TinyRecursiveModels](https://github.com/SamsungSAILMontreal/TinyRecursiveModels) - Original research and implementation.
-- [gmarchetti2020/TRM-Experiments](https://github.com/gmarchetti2020/TRM-Experiments) - Training insights.
-- [stockeh/mlx-trm](https://github.com/stockeh/mlx-trm) - Project structure inspiration.
+- [SamsungSAILMontreal/TinyRecursiveModels](https://github.com/SamsungSAILMontreal/TinyRecursiveModels) - Original research.
+
+ - [gmarchetti2020/TRM-Experiments](https://github.com/gmarchetti2020/TRM-Experiments) - Training insights.                      │ │
+- [stockeh/mlx-trm](https://github.com/stockeh/mlx-trm) - Project structure inspiration. 
+- [ml-explore/mlx](https://github.com/ml-explore/mlx) - The backbone framework.
+- [Kamisori-daijin](https://huggingface.co/Kamisori-daijin) - Modernization and MoE integration.
 
 ---
 Created by Kamisori-daijin
