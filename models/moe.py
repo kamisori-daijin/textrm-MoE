@@ -71,22 +71,21 @@ class MoELayer(nn.Module):
                 self.num_experts, dtype=x.dtype
             )
 
-        # 4. Expert Execution - Vectorized computation with masking
-        # Compute all expert outputs and apply masks (mathematically equivalent)
+        # 4. Expert Execution
         final_flat_output = mx.zeros_like(x_flat)
 
+        # For each expert, extract and calculate only the target tokens
+
         for i, expert in enumerate(self.experts):
-            # Compute this expert's output for all tokens
+
             expert_out = expert(x_flat)
 
-            # Apply top-k gating: sum contributions across all k positions
             for k in range(self.top_k):
-                # Create mask where this expert is selected at position k
-                k_mask = (top_k_indices[:, k : k + 1] == i).astype(x.dtype)
+                k_mask = top_k_indices[:, k : k + 1] == i
+
                 w = top_k_probs[:, k : k + 1]
-                # Apply mask to weight (unselected tokens get weight 0)
                 safe_w = w * k_mask
-                # Add this expert's weighted contribution
+
                 final_flat_output = final_flat_output + (expert_out * safe_w)
 
         return shared_out + final_flat_output.reshape(B, T, C), aux_loss
