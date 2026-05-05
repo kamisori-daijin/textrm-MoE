@@ -77,11 +77,10 @@ class MoELayer(nn.Module):
         # For each expert, extract and calculate only the target tokens
 
         for i, expert in enumerate(self.experts):
-
             expert_out = expert(x_flat)
 
             for k in range(self.top_k):
-                k_mask = top_k_indices[:, k : k + 1] == i
+                k_mask = (top_k_indices[:, k : k + 1] == i).astype(x.dtype)
 
                 w = top_k_probs[:, k : k + 1]
                 safe_w = w * k_mask

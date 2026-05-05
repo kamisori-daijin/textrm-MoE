@@ -69,11 +69,10 @@ Training data is automatically packed and masked .
 ## Acknowledgments
 
 - [SamsungSAILMontreal/TinyRecursiveModels](https://github.com/SamsungSAILMontreal/TinyRecursiveModels) - Original research.
-
- - [gmarchetti2020/TRM-Experiments](https://github.com/gmarchetti2020/TRM-Experiments) - Training insights.                      │ │
+- [gmarchetti2020/TRM-Experiments](https://github.com/gmarchetti2020/TRM-Experiments) - Training insights.                      
 - [stockeh/mlx-trm](https://github.com/stockeh/mlx-trm) - Project structure inspiration. 
 - [ml-explore/mlx](https://github.com/ml-explore/mlx) - The backbone framework.
-- [Kamisori-daijin](https://huggingface.co/Kamisori-daijin) - Modernization and MoE integration.
+- [chaowei312/dsan6650_final](https://github.com/chaowei312/dsan6650_final) - MoE System
 
 ---
 Created by Kamisori-daijin
