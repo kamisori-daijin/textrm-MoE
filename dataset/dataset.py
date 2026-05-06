@@ -62,11 +62,11 @@ def get_binary_datasets(
     train_bin = prepare_binary_data(tokenizer, "train_data.bin", max_samples=train_size)
     val_bin = prepare_binary_data(tokenizer, "val_data.bin", max_samples=val_size)
 
-    train_loader_factory = lambda: MLXBinaryDataLoader(
-        train_bin, batch_size, max_length, shuffle=True
-    )
-    val_loader_factory = lambda: MLXBinaryDataLoader(
-        val_bin, batch_size, max_length, shuffle=False
-    )
+    def train_loader_factory():
+        return MLXBinaryDataLoader(train_bin, batch_size, max_length, shuffle=True)
+        
+    def val_loader_factory()
+        return MLXBinaryDataLoader(val_bin, batch_size, max_length, shuffle=False)
+    
 
     return train_loader_factory, val_loader_factory
