@@ -1,5 +1,5 @@
 import os
-
+import mlx.core as mx
 from mlx.utils import tree_flatten
 from transformers import AutoTokenizer
 
@@ -44,11 +44,15 @@ model = TinyRecursiveModel(
     n_improvement_cycles=config["n_improvement_cycles"],
     num_experts=config["num_experts"],
 )
+model.set_dtype(mx.float16)
 
 # Count parameters
 n_params = sum(v.size for _, v in tree_flatten(model.parameters()))
 
+first_param = tree_flatten(model.parameters())[0][1]
+
 print(f"Model parameters: {n_params:,} ({n_params / 1e6:.2f}M)")
+print(f"Model dtype: {first_param.dtype}")
 print(
     f"Effective depth per supervision step: {config['n_improvement_cycles'] * (config['n_latent_recursions'] + 1) * config['n_layers']}"
 )
