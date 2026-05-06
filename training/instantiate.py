@@ -44,7 +44,7 @@ model = TinyRecursiveModel(
     n_improvement_cycles=config["n_improvement_cycles"],
     num_experts=config["num_experts"],
 )
-model.set_dtype(mx.float16)
+model.set_dtype(mx.bfloat16)
 
 # Count parameters
 n_params = sum(v.size for _, v in tree_flatten(model.parameters()))
