@@ -65,7 +65,7 @@ def get_binary_datasets(
     def train_loader_factory():
         return MLXBinaryDataLoader(train_bin, batch_size, max_length, shuffle=True)
         
-    def val_loader_factory()
+    def val_loader_factory():
         return MLXBinaryDataLoader(val_bin, batch_size, max_length, shuffle=False)
     
 
