@@ -1,18 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
-name = "mlx-trm"
-version = "0.1.0"
-description = "Add your description here"
+name = "textrm-MoE"
+version = "1.0.0"
+description = "An efficient reimplementation of TinyRecursiveModels using the MLX framework, enhanced with Mixture of Experts (MoE) and optimized for Apple Silicon."
 readme = "README.md"
-requires-python = ">=3.12"
-dependencies = [
-    "matplotlib>=3.10.7",
-    "mlx>=0.29.2",
-    "mlx-data>=0.2.0",
-    "tqdm>=4.67.1",
-    "torch",
-    "torchvision",
-    "torchaudio",
-    "transformers",
+keywords = ["mlx","moe","MoE","trm","Tiny Recursive model","TRM","Small"]
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+packages = ["src/textrm_moe"]
+authors = [
+    { name = "kamisori-daijin" }
+]
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
 ]
 
-
+dependencies = [
+    "mlx>=0.21.0",      
+    "numpy>=2.0",           
+    "matplotlib>=3.8",
+    "tqdm>=4.67.1",
+    "transformers>=4.37.2", 
+    "datasets>=2.19.0",
+]

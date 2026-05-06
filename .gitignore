@@ -7,6 +7,13 @@ wheels/
 *.egg-info
 .ruff_cache
 alpaca_dolly_combined/
+.env
+.venv/
+env/
+venv/
+build/
+dist/
+*.egg-info/
 
 # Virtual environments
 .venv
