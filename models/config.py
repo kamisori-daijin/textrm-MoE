@@ -1,6 +1,6 @@
 config = {
     "vocab_size": 32005,  # TinyLlama(32k) + 5 Special Tokens
-    "dim": 1024,  # Hidden dimension
+    "dim": 512,  # Hidden dimension
     "n_heads": 16,  # Attention heads
     "n_layers": 4,  # Only 4 layers
     "mlp_ratio": 4,
