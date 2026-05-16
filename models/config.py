@@ -11,10 +11,10 @@ config = {
     # Training
     "batch_size": 16,  # Increased from 1 to improve GPU utilization
     "gradient_accumulation_steps": 4, # Total effective batch = 64
-    "epochs": 20,
+    "epochs": 30,
     "lr": 1e-4,
     "warmup_steps": 500,
     "n_supervision_steps": 3,  # Deep supervision steps during training
-    "max_train_samples": 100000,  # Reduced for memory and speed
+    "max_train_samples": 10000,  # Reduced for memory and speed
     "max_val_samples": 1000,
 }

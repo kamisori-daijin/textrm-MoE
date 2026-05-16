@@ -7,7 +7,7 @@ from .prepare_binary_dataset import prepare_binary_data
 
 
 class MLXBinaryDataLoader:
-    def __init__(self, bin_file, batch_size, max_length=512, shuffle=False):
+    def __init__(self, bin_file, batch_size, max_length=512, shuffle=False,max_samples=None):
         if not os.path.exists(bin_file):
             raise FileNotFoundError(f"Binary file not found: {bin_file}.")
 
@@ -17,6 +17,13 @@ class MLXBinaryDataLoader:
         self.shuffle = shuffle
 
         self.num_samples = (len(self.data) - 1) // self.max_length
+        total_samples = (len(self.data) - 1) // self.max_length
+
+        
+        if max_samples is not None:
+            self.num_samples = min(total_samples, max_samples)
+        else:
+            self.num_samples = total_samples
 
     def __iter__(self):
         indices = np.arange(self.num_samples)
@@ -63,10 +70,10 @@ def get_binary_datasets(
     val_bin = prepare_binary_data(tokenizer, "val_data.bin", max_samples=val_size)
 
     def train_loader_factory():
-        return MLXBinaryDataLoader(train_bin, batch_size, max_length, shuffle=True)
+        return MLXBinaryDataLoader(train_bin, batch_size, max_length, shuffle=True,max_samples=train_size)
         
     def val_loader_factory():
-        return MLXBinaryDataLoader(val_bin, batch_size, max_length, shuffle=False)
+        return MLXBinaryDataLoader(val_bin, batch_size, max_length, shuffle=False,max_samples=val_size)
     
 
     return train_loader_factory, val_loader_factory
