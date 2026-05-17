@@ -15,6 +15,6 @@ config = {
     "lr": 1e-4,
     "warmup_steps": 500,
     "n_supervision_steps": 3,  # Deep supervision steps during training
-    "max_train_samples": 10000,  # Reduced for memory and speed
+    "max_train_samples": 70000,  # Reduced for memory and speed
     "max_val_samples": 1000,
 }

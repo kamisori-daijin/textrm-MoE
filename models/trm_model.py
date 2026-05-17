@@ -161,3 +161,37 @@ class TinyRecursiveModel(nn.Module):
             total_main_loss / n_supervision_steps,
             total_aux_loss / n_supervision_steps,
         )
+        
+    def generate(self, input_ids, max_new_tokens=50, temperature=0.8, top_k=40):
+        """Generate text autoregressively"""
+        B, T = input_ids.shape
+        generated = input_ids
+        
+        for _ in range(max_new_tokens):
+            curr_input = generated[:, -self.max_seq_len:]
+            _, curr_T = curr_input.shape
+
+            x = self.token_emb(curr_input) + self.pos_emb(mx.arange(curr_T)[None, :])
+            y = mx.broadcast_to(self.y_init, (B, curr_T, self.dim))
+            z = mx.broadcast_to(self.z_init, (B, curr_T, self.dim))
+
+            y, z, logits, _, _ = self.deep_recursion(x, y, z, training=False)
+            
+            # Get the Logits of the last token and divide by the temperature.
+            next_token_logits = logits[:, -1, :] / temperature
+            
+            if top_k is not None and top_k > 0:
+                k = min(top_k, next_token_logits.shape[-1])
+                v = mx.topk(next_token_logits, k, axis=-1)
+                
+                thresh = v[:, 0:1] 
+                
+                next_token_logits = mx.where(next_token_logits < thresh, float("-inf"), next_token_logits)
+
+            next_token = mx.random.categorical(next_token_logits, num_samples=1)
+            generated = mx.concatenate([generated, next_token], axis=-1)
+                    
+                    
+            mx.eval(generated)
+
+        return generated
