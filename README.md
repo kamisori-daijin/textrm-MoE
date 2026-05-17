@@ -1,23 +1,89 @@
-# MLX Tiny Recursive Models with Mixture of Experts (textrm-MoE)
+<h1 align="center">textrm-MoE</h1>
 
-An efficient reimplementation of [TinyRecursiveModels](https://github.com/SamsungSAILMontreal/TinyRecursiveModels) using the [MLX](https://github.com/ml-explore/mlx) framework, enhanced with **Mixture of Experts (MoE)** and optimized for Apple Silicon.
+<p align="center">
+  <strong>MLX Tiny Recursive Models with Mixture of Experts</strong>
+</p>
 
-## Key Features
+<p align="center">
+  <img src="https://img.shields.io/badge/Framework-MLX-blue.svg?style=flat-square" alt="MLX">
+  <img src="https://img.shields.io/badge/Architecture-TRM%20%2B%20MoE-purple.svg?style=flat-square" alt="TRM + MoE">
+  <img src="https://img.shields.io/badge/Hardware-Apple%20Silicon-orange.svg?style=flat-square" alt="Apple Silicon">
+  <img src="https://img.shields.io/badge/License-Apache2.0-green.svg?style=flat-square" alt="License: Apache2.0">
+  <img src="https://img.shields.io/badge/Dependencies-Minimal-brightgreen.svg?style=flat-square" alt="Dependencies">
+</p>
 
-- **MLX Native**: Built for high-performance inference and training on Apple Silicon.
-- **Recursive Latent Reasoning**: Implements the TRM architecture where a single "tiny" network is reused across latent recursions (`n`) and improvement cycles (`T`).
-- **Mixture of Experts (MoE)**:
-    - Integrated `MoELayer` with Top-k routing.
-    - Persistent **Shared Expert** for capturing general knowledge alongside specialized experts.
-    - Auxiliary loss for expert load balancing.
-- **Adaptive Computation**: Includes a `Halt Head` to learn optimal early-exit or accuracy-based termination.
-- **Efficient Binary Data Pipeline**: 
-    - Automated pre-tokenization and export to binary format (`.bin`).
-    - High-speed data loading using `np.memmap` for zero-copy memory access.
-- **Deep Supervision**: Multi-step intermediate losses ensure stable convergence of recursive layers.
-- **Modern Architecture**: Uses RoPE (Rotary Positional Embeddings), RMSNorm, and SwiGLU experts.
+--- 
 
-## Usage
+An efficient reimplementation and heavy extension of [SamsungSAILMontreal/TinyRecursiveModels](https://github.com/SamsungSAILMontreal/TinyRecursiveModels) using the [MLX](https://github.com/ml-explore/mlx) framework. Enhanced with a custom **Mixture of Experts (MoE)** 
+
+## 🚀 Key Features
+
+- **MLX Native Execution**: Built from the ground up for high-performance training and inference on Apple Silicon Unified Memory.
+- **Recursive Latent Reasoning (TRM)**: Reuses a compact structural network across latent recursions (`n`) and improvement cycles (`T`) to allow tokens to "deliberate" deeper in the hidden state space before output projection.
+- **Advanced Mixture of Experts (MoE)**:
+    - **Top-k Routing**: Dynamic gating with configurable expert allocation per token.
+    - **Persistent Shared Expert**: A dedicated, non-gated expert always active alongside specialized experts to capture invariant general knowledge.
+    - **SwiGLU Experts**: High-capacity feed-forward expert layers utilizing SwiGLU activations.
+- **Adaptive Computation via Halt Head**: Integrates a learned Ponder/Halt module to dynamically determine optimal early-exit or accuracy-based execution termination.
+- **Dual-Compiled Low-Level Pipeline**: Engineered with strict pure-functional compilation primitives (`@mx.compile`) to completely bypass Metal argument buffer exhaustion and eliminate lazy-evaluation memory leaks.
+- **Zero-Copy Data Pipeline**: Pre-tokenizes and maps datasets (Cosmopedia, FineWeb, etc.) directly into raw binary (`.bin`) files, leveraging `np.memmap` for instantaneous zero-overhead mini-batch loading.
+- **Deep Supervision & EMA**: Multi-step intermediate losses guide the trajectory of recursive state evolution, paired with an Exponential Moving Average (EMA) shadow-weight pipeline for superior validation stability.
+
+---
+
+## 🛠️ Architecture & Core Configuration
+
+The configuration maximizes parameter efficiency. By coupling recursive weight-sharing with an 8-expert routing framework, the network scales its functional capacity to **90M total parameters** while keeping the active compute cost per token extremely lean.
+
+```python
+config = {
+    "vocab_size": 32005,              # TinyLlama (32k) base + 5 Special Tokens
+    "dim": 512,                       # Hidden dimension
+    "n_heads": 16,                    # Attention heads
+    "n_layers": 4,                    # Structural layer blocks
+    "mlp_ratio": 4,                   # Expert internal expansion ratio
+    "num_experts": 8,                 # Total specialized experts per layer
+    "max_seq_len": 512,               # Context context window
+    "n_latent_recursions": 5,         # Internal recurrent reasoning loops
+    "n_improvement_cycles": 2,        # Refinement iteration passes
+    
+    # Dual-Compiled Training Dynamics
+    "batch_size": 32,                 # Critical physical batch size for router entropy
+    "gradient_accumulation_steps": 2, # Kept at 1 to enforce dense token-variance
+    "epochs": 30,
+    "lr": 1e-4,                       # Learning rate with linear warmup
+    "warmup_steps": 500,              # Warmup duration
+    "n_supervision_steps": 3,         # Intermediary deep supervision depth
+    "max_train_samples": 70000,
+    "max_val_samples": 1000,
+}
+
+```
+
+---
+
+## 🏋️ Hardware Constraints & Optimization Insights
+
+Due to the extreme graph depth generated by combining **MoE routing**, **recurrent layers**, and **multi-step deep supervision**, standard training configurations will encounter unique constraints on Apple Silicon. This implementation solves them via two architectural strategies:
+
+### 1. Bypassing Metal Fused Kernel Limits
+
+Nesting loops inside a single `@mx.compile` block forces MLX to fuse the entire forward/backward pass into a massive monolithic GPU kernel. In recurrent MoE models, this quickly exhausts the available Metal argument buffers, triggering runtime crashes.
+
+To solve this, `textrm-MoE` divides execution into a **Dual-Compiled Pipeline**:
+
+* **`_accumulate_step`**: Compiles a single localized forward/backward pass, keeping the Metal computation graph compact and isolated.
+* **`_update_step`**: A separate compiled routine handling optimizer state updates, gradient clipping, and EMA shadow tracking.
+
+### 2. Preventing Router Collapse (Why `batch_size: 32 / steps: 2`)
+
+MoE routing matrices operate on relative token distributions within a given physical batch. Reducing the physical batch size (e.g., down to 16) restricts the variance of the token pool, tricking the router into concentrating all assignments onto a few experts (Router Collapse).
+
+To ensure optimal structural entropy and low auxiliary routing loss, the system enforces a high physical batch size (`32`) natively, bypassing gradient accumulation loops to pass dense token clouds straight into the Metal parallel units.
+
+---
+
+## 📦 Usage
 
 ### 1. Setup the Environment
 
@@ -25,54 +91,35 @@ An efficient reimplementation of [TinyRecursiveModels](https://github.com/Samsun
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+
 ```
 
-### 2. Configure the Model
+### 2. Training Execution
 
-Adjust hyperparameters in `models/config.py`. The defaults are tuned for performance on M-series MacBooks.
-
-```python
-config = {
-    "vocab_size": 32005,
-    "dim": 1024,
-    "n_heads": 16,
-    "n_layers": 4,
-    "n_latent_recursions": 5,
-    "n_improvement_cycles": 2,
-    "num_experts": 8,
-    "max_seq_len": 512,
-}
-```
-
-### 3. Training
-
-Launch the training script. It will automatically download the required datasets (Cosmopedia, FineWeb, etc.), prepare binary caches, and begin training with EMA (Exponential Moving Average) weights.
+The training pipeline automatically checks for your pre-tokenized binary files, establishes the memory-mapped loader, and initiates the dual-compiled training steps.
 
 ```bash
 python train.py
+
 ```
 
-### 4. Inference
+### 3. Inference & Sample Generation
 
-Run generation tests using the trained weights (default: `final_model.safetensors`):
+To evaluate your model checkpoints (`.safetensors`), execute the interactive text-generation script:
 
 ```bash
 python inference.py
+
 ```
 
-## Dataset & Special Tokens
+---
 
-The model uses a TinyLlama-based tokenizer .
+## 🤝 Acknowledgments
 
-Training data is automatically packed and masked .
-
-## Acknowledgments
-
-- [SamsungSAILMontreal/TinyRecursiveModels](https://github.com/SamsungSAILMontreal/TinyRecursiveModels) - Original research.
-- [gmarchetti2020/TRM-Experiments](https://github.com/gmarchetti2020/TRM-Experiments) - Training insights.                      
-- [stockeh/mlx-trm](https://github.com/stockeh/mlx-trm) - Project structure inspiration. 
-- [ml-explore/mlx](https://github.com/ml-explore/mlx) - The backbone framework.
-- [chaowei312/dsan6650_final](https://github.com/chaowei312/dsan6650_final) - MoE System
+* [SamsungSAILMontreal/TinyRecursiveModels](https://github.com/SamsungSAILMontreal/TinyRecursiveModels) - Original pioneering research on recursive latent states.
+* [gmarchetti2020/TRM-Experiments](https://github.com/gmarchetti2020/TRM-Experiments) - Training insights.
+* [stockeh/mlx-trm](https://github.com/stockeh/mlx-trm) - Project structure conventions.
+* [ml-explore/mlx](https://github.com/ml-explore/mlx) - The core Apple Silicon tensor framework.
+* [chaowei312/dsan6650_final](https://github.com/chaowei312/dsan6650_final) - MoE routing and system mechanics.
 
 ---
-Created by Kamisori-daijin
