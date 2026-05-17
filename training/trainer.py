@@ -33,7 +33,7 @@ def train(
     # Initialize EMA
     ema = EMA(model, decay=ema_decay)
 
-    # 1. Loss function operating on pure trainable parameters
+    # Loss function operating on pure trainable parameters
     def loss_fn(params, x, y):
         model.update(params)
         main, aux = model(
@@ -44,38 +44,34 @@ def train(
 
     loss_and_grad_fn = nn.value_and_grad(model, loss_fn)
 
-    # 2. Fully compiled step that handles forward, backward, accumulation, and updates
-    # This completely eliminates state passing boundaries between Python and compiled graph
+    # 1. Compile ONLY a single micro-batch step (Keeps Metal graph compact)
     @mx.compile
-    def _full_train_step(trainable_params, optimizer_state, ema_shadow, batch_list):
-        # Initialize accumulated gradients matching the structure of trainable parameters
-        accumulated_grads = tree_map(lambda p: mx.zeros_like(p), trainable_params)
+    def _accumulate_step(trainable_params, accumulated_grads, x, y, scale):
+        (loss, aux), grads = loss_and_grad_fn(trainable_params, x, y)
         
-        param_dtype = tree_flatten(trainable_params)[0][1].dtype
-        total_loss = mx.array(0.0, dtype=param_dtype)
-        total_aux = mx.array(0.0, dtype=param_dtype)
-        
-        n = len(batch_list)
-        
-        # Loop over accumulated micro-batches inside the compiled graph
-        for x, y in batch_list:
-            (loss, aux), grads = loss_and_grad_fn(trainable_params, x, y)
-            total_loss = total_loss + loss / n
-            total_aux = total_aux + aux / n
-            accumulated_grads = tree_map(lambda g, ag: ag + g / n, grads, accumulated_grads)
+        # Accumulate scaled gradients inside a small compiled graph
+        next_accumulated_grads = tree_map(
+            lambda g, ag: ag + (g * scale), grads, accumulated_grads
+        )
+        return next_accumulated_grads, loss, aux
 
-        # Update optimizer state and model parameters
+    # 2. Compile optimizer and EMA updates together (Separated from loss graph)
+    @mx.compile
+    def _update_step(trainable_params, optimizer_state, ema_shadow, accumulated_grads):
+        model.update(trainable_params)
         optimizer.state.update(optimizer_state)
+        
+        # Clip and apply gradients
         grads, _ = optim.clip_grad_norm(accumulated_grads, 1.0)
         optimizer.update(model, grads)
         
-        # Update EMA shadow weights
+        # Update EMA shadow
         next_params = model.trainable_parameters()
         def _ema_update(s, p):
             return ema_decay * s + (1.0 - ema_decay) * p
         next_ema_shadow = tree_map(_ema_update, ema_shadow, next_params)
-
-        return model.trainable_parameters(), optimizer.state, next_ema_shadow, total_loss, total_aux
+        
+        return model.trainable_parameters(), optimizer.state, next_ema_shadow
 
     best_val_loss = float("inf")
 
@@ -89,31 +85,52 @@ def train(
         current_batches = []
 
         for i, (input_ids, targets) in enumerate(train_loader_inst):
-            # Pre-convert tensors to proper types outside to avoid trace warnings
             current_batches.append((input_ids.astype(mx.int32), targets.astype(mx.int32)))
 
             if len(current_batches) == gradient_accumulation_steps:
-                # Run the fully consolidated train step
-                trainable_params, optim_state, ema_shadow, loss, aux = _full_train_step(
-                    model.trainable_parameters(),
-                    optimizer.state,
-                    ema.shadow,
-                    current_batches
+                
+                # Fetch initial raw states from objects
+                trainable_params = model.trainable_parameters()
+                optim_state = optimizer.state
+                ema_shadow = ema.shadow
+                
+                # Safely initialize accumulated gradients tensor matching params structure
+                accumulated_grads = tree_map(lambda p: mx.zeros_like(p), trainable_params)
+                
+                param_dtype = tree_flatten(trainable_params)[0][1].dtype
+                total_loss = mx.array(0.0, dtype=param_dtype)
+                total_aux = mx.array(0.0, dtype=param_dtype)
+                
+                n = len(current_batches)
+                scale = mx.array(1.0 / n, dtype=param_dtype)
+
+                # Process sequentially in Python to break up Metal kernel sizes,
+                # but each accumulation step is tightly compiled.
+                for x, y in current_batches:
+                    accumulated_grads, loss, aux = _accumulate_step(
+                        trainable_params, accumulated_grads, x, y, scale
+                    )
+                    total_loss = total_loss + loss * scale
+                    total_aux = total_aux + aux * scale
+
+                # Apply weight updates using the separate compiled update function
+                trainable_params, optim_state, ema_shadow = _update_step(
+                    trainable_params, optim_state, ema_shadow, accumulated_grads
                 )
                 
-                # Apply the returned pure dictionaries back to the objects
+                # Push updated structural dicts back into active objects
                 model.update(trainable_params)
                 optimizer.state.update(optim_state)
                 ema.shadow = ema_shadow
 
-                # Evaluate all state dictionaries and outputs at once to free memory
-                mx.eval(model.parameters(), optimizer.state, ema.shadow, loss, aux)
+                # Explicitly evaluate everything at once to clear lazy computation paths
+                mx.eval(model.parameters(), optimizer.state, ema.shadow, total_loss, total_aux)
 
                 pbar.update(1)
                 pbar.set_postfix(
                     {
-                        "loss": f"{loss.item():.4f}",
-                        "aux": f"{aux.item():.6f}",
+                        "loss": f"{total_loss.item():.4f}",
+                        "aux": f"{total_aux.item():.6f}",
                         "lr": f"{optimizer.learning_rate.item():.6f}",
                     }
                 )
