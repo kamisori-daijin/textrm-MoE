@@ -30,6 +30,11 @@ An efficient reimplementation and heavy extension of [SamsungSAILMontreal/TinyRe
 - **Deep Supervision & EMA**: Multi-step intermediate losses guide the trajectory of recursive state evolution, paired with an Exponential Moving Average (EMA) shadow-weight pipeline for superior validation stability.
 
 ---
+## 📚 Documentation
+
+- [Project structure and tooling](docs/tool.md)
+- [Model architecture](docs/model.md)
+---
 
 ## 🛠️ Architecture & Core Configuration
 
@@ -110,13 +115,6 @@ To evaluate your model checkpoints (`.safetensors`), execute the interactive tex
 ```bash
 python inference.py
 ```
-
----
-
-## 📚 Documentation
-
-- [Project structure and tooling](docs/tool.md)
-- [Model architecture](docs/model.md)
 
 ---
 
