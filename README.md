@@ -109,8 +109,14 @@ To evaluate your model checkpoints (`.safetensors`), execute the interactive tex
 
 ```bash
 python inference.py
-
 ```
+
+---
+
+## 📚 Documentation
+
+- [Project structure and tooling](docs/tool.md)
+- [Model architecture](docs/model.md)
 
 ---
 
