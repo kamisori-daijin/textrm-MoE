@@ -12,7 +12,7 @@ config = {
     "batch_size": 32,  # Increased from 1 to improve GPU utilization
     "gradient_accumulation_steps": 2, # Total effective batch = 64
     "epochs": 30,
-    "lr": 1e-4,
+    "lr": 5e-5,
     "warmup_steps": 500,
     "n_supervision_steps": 3,  # Deep supervision steps during training
     "max_train_samples": 70000,  # Reduced for memory and speed
