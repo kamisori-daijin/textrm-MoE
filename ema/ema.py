@@ -6,7 +6,7 @@ from mlx.utils import tree_map
 class EMA:
     """Exponential Moving Average"""
 
-    def __init__(self, model: nn.Module, decay: float = 0.999):
+    def __init__(self, model: nn.Module, decay: float = 0.9995):
         self.model = model
         self.decay = decay
 

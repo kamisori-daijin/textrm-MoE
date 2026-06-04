@@ -15,11 +15,11 @@ def train(
     val_loader,
     tokenizer,
     epochs=20,
-    lr=8e-5,
+    lr=5e-5,
     warmup_steps=1000,
     n_supervision_steps=4,
     gradient_accumulation_steps=2,
-    ema_decay=0.999,
+    ema_decay=0.9995,
     aux_loss_coef=0.01,
     save_path="textrm-model.safetensors",
 ):
