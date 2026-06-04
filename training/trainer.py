@@ -15,7 +15,7 @@ def train(
     val_loader,
     tokenizer,
     epochs=20,
-    lr=5e-5,
+    lr=8e-5,
     warmup_steps=1000,
     n_supervision_steps=4,
     gradient_accumulation_steps=2,
