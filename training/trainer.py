@@ -1,9 +1,9 @@
 import os
-
+import math
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
-from mlx.utils import tree_flatten,tree_map
+from mlx.utils import tree_flatten, tree_map
 from tqdm import tqdm
 
 from ema.ema import EMA
@@ -23,19 +23,28 @@ def train(
     aux_loss_coef=0.01,
     save_path="textrm-model.safetensors",
 ):
-
-    # Set up learning rate schedule and optimizer
+    # 1. Configure schedule and optimizer
     lr_schedule = optim.linear_schedule(0, lr, steps=warmup_steps)
     optimizer = optim.AdamW(
         learning_rate=lr_schedule, betas=[0.9, 0.95], weight_decay=0.1
     )
 
-    # Initialize EMA
+    # Automatically resume optimizer states via direct property assignment conforming to official specs
+    latest_optim_path = "textrm_latest_optim.safetensors"
+    if os.path.exists(latest_optim_path):
+        print(f"🔄 Restoring optimizer states from checkpoint: {latest_optim_path}")
+        try:
+            loaded_optim_state = mx.load(latest_optim_path)
+            optimizer.state = loaded_optim_state
+            print("✅ Optimizer states (step count, momentum tables, etc.) successfully restored.")
+        except Exception as e:
+            print(f"⚠️ Failed to restore optimizer state (initializing from default settings): {e}")
+
+    # Initialize Exponential Moving Average (EMA)
     ema = EMA(model, decay=ema_decay)
 
-    # Loss function operating on pure trainable parameters
+    # 2. Purely functional loss routine completely stripped of internal state updates
     def loss_fn(params, x, y):
-        model.update(params)
         main, aux = model(
             x, y, n_supervision_steps=n_supervision_steps, training=True
         )
@@ -44,103 +53,112 @@ def train(
 
     loss_and_grad_fn = nn.value_and_grad(model, loss_fn)
 
-    # 1. Compile ONLY a single micro-batch step (Keeps Metal graph compact)
+    # 3. Consolidate accumulation, updates, and EMA updates into a single monolithic graph.
     @mx.compile
-    def _accumulate_step(trainable_params, accumulated_grads, x, y, scale):
-        (loss, aux), grads = loss_and_grad_fn(trainable_params, x, y)
-        
-        # Accumulate scaled gradients inside a small compiled graph
-        next_accumulated_grads = tree_map(
-            lambda g, ag: ag + (g * scale), grads, accumulated_grads
-        )
-        return next_accumulated_grads, loss, aux
-
-    # 2. Compile optimizer and EMA updates together (Separated from loss graph)
-    @mx.compile
-    def _update_step(trainable_params, optimizer_state, ema_shadow, accumulated_grads):
+    def _full_train_step(trainable_params, optimizer_state, ema_shadow, current_batches_x, current_batches_y):
+        # Synchronize transient objects to capture state transformations mathematically within the graph
         model.update(trainable_params)
-        optimizer.state.update(optimizer_state)
         
-        # Clip and apply gradients
+        accumulated_grads = tree_map(lambda p: mx.zeros_like(p), trainable_params)
+        total_loss = mx.array(0.0, dtype=mx.float32)
+        total_aux = mx.array(0.0, dtype=mx.float32)
+        
+        n = len(current_batches_x)
+        scale = 1.0 / n
+
+        for x, y in zip(current_batches_x, current_batches_y):
+            (loss, aux), grads = loss_and_grad_fn(trainable_params, x, y)
+            
+            accumulated_grads = tree_map(
+                lambda g, ag: ag + (g * scale), grads, accumulated_grads
+            )
+            total_loss += loss * scale
+            total_aux += aux * scale
+
         grads, _ = optim.clip_grad_norm(accumulated_grads, 1.0)
-        optimizer.update(model, grads)
         
-        # Update EMA shadow
-        next_params = model.trainable_parameters()
+        # Purely functional updates calculated based on the decoupled `optimizer_state` and parameter tables
+        new_params = optimizer.apply_gradients(grads, trainable_params)
+        
         def _ema_update(s, p):
             return ema_decay * s + (1.0 - ema_decay) * p
-        next_ema_shadow = tree_map(_ema_update, ema_shadow, next_params)
+        next_ema_shadow = tree_map(_ema_update, ema_shadow, new_params)
         
-        return model.trainable_parameters(), optimizer.state, next_ema_shadow
+        return new_params, optimizer.state, next_ema_shadow, total_loss, total_aux
 
     best_val_loss = float("inf")
+    latest_model_path = "textrm_latest.safetensors"
 
     # Main training loop
     for epoch in range(epochs):
         model.train()
 
         train_loader_inst = train_loader()
-        total_steps = len(train_loader_inst) // gradient_accumulation_steps
+        # Compute exact tqdm total steps handling fractional macro-batches seamlessly
+        total_steps = math.ceil(len(train_loader_inst) / gradient_accumulation_steps)
         pbar = tqdm(total=total_steps, desc=f"Epoch {epoch + 1}/{epochs}", unit="step")
-        current_batches = []
+        current_batches_x = []
+        current_batches_y = []
+
+        # Encapsulated helper to dispatch steps uniformly and mitigate dry-run copy pastes
+        def dispatch_train_step(batches_x, batches_y):
+            trainable_params = model.trainable_parameters()
+            optim_state = optimizer.state
+            ema_shadow = ema.shadow
+            
+            trainable_params, optim_state, ema_shadow, total_loss, total_aux = _full_train_step(
+                trainable_params, optim_state, ema_shadow, batches_x, batches_y
+            )
+            
+            # Update stateful tracking containers outside compilation scopes
+            model.update(trainable_params)
+            optimizer.state = optim_state
+            ema.shadow = ema_shadow
+
+            # Realize deferred evaluation pipelines immediately to flush GPU allocation caches safely
+            mx.eval(trainable_params, optimizer.state, ema.shadow, total_loss, total_aux)
+            mx.clear_cache()
+            return total_loss.item(), total_aux.item()
 
         for i, (input_ids, targets) in enumerate(train_loader_inst):
-            current_batches.append((input_ids.astype(mx.int32), targets.astype(mx.int32)))
+            current_batches_x.append(input_ids.astype(mx.int32))
+            current_batches_y.append(targets.astype(mx.int32))
 
-            if len(current_batches) == gradient_accumulation_steps:
-                
-                # Fetch initial raw states from objects
-                trainable_params = model.trainable_parameters()
-                optim_state = optimizer.state
-                ema_shadow = ema.shadow
-                
-                # Safely initialize accumulated gradients tensor matching params structure
-                accumulated_grads = tree_map(lambda p: mx.zeros_like(p), trainable_params)
-                
-                param_dtype = tree_flatten(trainable_params)[0][1].dtype
-                total_loss = mx.array(0.0, dtype=param_dtype)
-                total_aux = mx.array(0.0, dtype=param_dtype)
-                
-                n = len(current_batches)
-                scale = mx.array(1.0 / n, dtype=param_dtype)
-
-                # Process sequentially in Python to break up Metal kernel sizes,
-                # but each accumulation step is tightly compiled.
-                for x, y in current_batches:
-                    accumulated_grads, loss, aux = _accumulate_step(
-                        trainable_params, accumulated_grads, x, y, scale
-                    )
-                    total_loss = total_loss + loss * scale
-                    total_aux = total_aux + aux * scale
-
-                # Apply weight updates using the separate compiled update function
-                trainable_params, optim_state, ema_shadow = _update_step(
-                    trainable_params, optim_state, ema_shadow, accumulated_grads
-                )
-                
-                # Push updated structural dicts back into active objects
-                model.update(trainable_params)
-                optimizer.state.update(optim_state)
-                ema.shadow = ema_shadow
-
-                # Explicitly evaluate everything at once to clear lazy computation paths
-                mx.eval(model.parameters(), optimizer.state, ema.shadow, total_loss, total_aux)
-
+            if len(current_batches_x) == gradient_accumulation_steps:
+                loss_val, aux_val = dispatch_train_step(current_batches_x, current_batches_y)
                 pbar.update(1)
                 pbar.set_postfix(
                     {
-                        "loss": f"{total_loss.item():.4f}",
-                        "aux": f"{total_aux.item():.6f}",
+                        "loss": f"{loss_val:.4f}",
+                        "aux": f"{aux_val:.6f}",
                         "lr": f"{optimizer.learning_rate.item():.6f}",
                     }
                 )
+                current_batches_x = []
+                current_batches_y = []
 
-                current_batches = []
-                mx.clear_cache()
+        # Salvage and compute unaligned tail-end micro-batches left over at epoch completion bounds
+        if current_batches_x:
+            loss_val, aux_val = dispatch_train_step(current_batches_x, current_batches_y)
+            pbar.update(1)
+            pbar.set_postfix(
+                {
+                    "loss": f"{loss_val:.4f}",
+                    "aux": f"{aux_val:.6f}",
+                    "lr": f"{optimizer.learning_rate.item():.6f}",
+                    }
+            )
+            current_batches_x = []
+            current_batches_y = []
 
         pbar.close()
+
+        # Persist standard recovery states safely at checked block-level execution boundaries
+        print(f"💾 Saving latest epoch {epoch + 1} checkpoints for session recovery...")
+        model.save_weights(latest_model_path)
+        mx.save_safetensors(latest_optim_path, optimizer.state)
         
-        # Apply EMA weights for evaluation
+        # Deploy active EMA state tables onto the network tracking instances during evaluations
         ema.apply_shadow()
 
         # Validation phase
@@ -159,7 +177,7 @@ def train(
         val_loss /= max(val_steps, 1)
         print(f"Val Loss: {val_loss:.4f}")
 
-        # Save checkpoint
+        # Persist standard training checkpoint files
         base, ext = os.path.splitext(save_path)
         if not ext:
             ext = ".safetensors"
@@ -168,18 +186,18 @@ def train(
         model.save_weights(checkpoint_name)
         print(f"Checkpoint saved: {checkpoint_name}")
 
-        # Generation sample
+        # Sample generation task executing on unconstrained context tracking loops
         test_prompt = "Write a polite refusal email"
         test_ids = mx.array([tokenizer.encode(test_prompt)])
         generated = model.generate(test_ids, max_new_tokens=50)
-        print(f"Sample: {tokenizer.decode(generated[0].tolist())[:150]}\n")
+        print(f"Sample: {tokenizer.decode(generated.tolist())[:150]}\n")
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             model.save_weights(save_path)
             print(f"Best model updated: {val_loss:.4f}")
 
-        # Restore original online weights
+        # Revert online baseline targets back to online operational targets
         ema.restore()
 
     return model

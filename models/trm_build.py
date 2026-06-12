@@ -1,21 +1,20 @@
 import mlx.core as mx
 import mlx.nn as nn
 from models.moe import MoELayer
-import math
 
 class RMSNorm(nn.Module):
     """Root Mean Square Layer Normalization"""
     def __init__(self, dim, eps=1e-6):
         super().__init__()
-       
         self.rms_norm = nn.RMSNorm(dims=dim, eps=eps)
 
     def __call__(self, x):
         return self.rms_norm(x)
 
+
 class CausalSelfAttention(nn.Module):
-    """Multi-head causal self-attention with RoPE"""
-    def __init__(self, dim, n_heads, max_seq_len=512):
+    """Multi-head causal self-attention with RoPE (Fully Dynamic & Recursion-Safe)"""
+    def __init__(self, dim, n_heads):
         super().__init__()
         assert dim % n_heads == 0
         self.n_heads = n_heads
@@ -23,54 +22,41 @@ class CausalSelfAttention(nn.Module):
 
         self.qkv = nn.Linear(dim, 3 * dim, bias=False)
         self.proj = nn.Linear(dim, dim, bias=False)
-        
-        
         self.rope = nn.RoPE(dims=self.head_dim, traditional=True)
 
-        
-        mask = mx.triu(mx.ones((max_seq_len, max_seq_len)), k=1).astype(mx.bool_)
-        self.mask = mask
-
-    def __call__(self, x):
+    def __call__(self, x, apply_rope: bool = True):
         B, T, C = x.shape
 
         qkv = self.qkv(x)
         q, k, v = mx.split(qkv, 3, axis=-1)
 
-        
-        q = q.reshape(B, T, self.n_heads, self.head_dim)
-        k = k.reshape(B, T, self.n_heads, self.head_dim)
-        v = v.reshape(B, T, self.n_heads, self.head_dim)
+        # Reshape and transpose to [B, H, T, D] format
+        q = q.reshape(B, T, self.n_heads, self.head_dim).transpose(0, 2, 1, 3)
+        k = k.reshape(B, T, self.n_heads, self.head_dim).transpose(0, 2, 1, 3)
+        v = v.reshape(B, T, self.n_heads, self.head_dim).transpose(0, 2, 1, 3)
 
-        
-        q = self.rope(q)
-        k = self.rope(k)
+        # Apply RoPE rotation strictly on the initial recursion step to prevent spatial coordinate distortion
+        if apply_rope:
+            q = self.rope(q)
+            k = self.rope(k)
 
+        # Invoke the optimized fast SDPA kernel conforming to official MLX specifications
+        scale = self.head_dim ** -0.5
+        y = mx.fast.scaled_dot_product_attention(
+            q, k, v, 
+            scale=scale, 
+            mask="causal"
+        )
         
-        q = q.transpose(0, 2, 1, 3)
-        k = k.transpose(0, 2, 1, 3)
-        v = v.transpose(0, 2, 1, 3)
-
-        # Scale Dot-Product Attention
-        att = (q @ k.transpose(0, 1, 3, 2)) * (1.0 / math.sqrt(self.head_dim))
-        
-       
-        current_mask = self.mask[:T, :T]
-        att = mx.where(current_mask, float('-inf'), att)
-        att = mx.softmax(att, axis=-1)
-
-        y = att @ v
-        
-       
         y = y.transpose(0, 2, 1, 3).reshape(B, T, C)
         return self.proj(y)
 
+
 class TransformerBlock(nn.Module):
-    def __init__(self, dim, n_heads, mlp_ratio=4, max_seq_len=512, num_experts=8):
+    def __init__(self, dim, n_heads, mlp_ratio=4, num_experts=8):
         super().__init__()
-        
         self.norm1 = RMSNorm(dim)
-        self.attn = CausalSelfAttention(dim, n_heads, max_seq_len)
+        self.attn = CausalSelfAttention(dim, n_heads)
         self.norm2 = RMSNorm(dim)
         
         self.moe = MoELayer(
@@ -81,12 +67,9 @@ class TransformerBlock(nn.Module):
             shared_expert=True
         )
 
-    def __call__(self, x, training: bool = True):
-        # Attention sub-layer 
-        x = x + self.attn(self.norm1(x))
-        
-        # MoE sub-layer 
+    def __call__(self, x, apply_rope: bool = True, training: bool = True):
+        # Forward the positional embedding condition down to the self-attention layer
+        x = x + self.attn(self.norm1(x), apply_rope=apply_rope)
         moe_out, aux_loss = self.moe(self.norm2(x), training=training)
         x = x + moe_out
-        
         return x, aux_loss

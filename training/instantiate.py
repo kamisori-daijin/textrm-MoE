@@ -5,10 +5,11 @@ from transformers import AutoTokenizer
 from models.config import config
 from models.trm_model import TinyRecursiveModel
 
-# Tokenizer
+# 1. Initialize and Expand Tokenizer Custom Vocabularies
 model_id = "TinyLlama/TinyLlama_v1.1"
 tokenizer = AutoTokenizer.from_pretrained(model_id)
 
+# Inject reasoning-specific control tags directly to govern system behaviors smoothly
 special_tokens_dict = {
     "additional_special_tokens": [
         "<user>",
@@ -19,35 +20,33 @@ special_tokens_dict = {
     ]
 }
 tokenizer.add_special_tokens(special_tokens_dict)
-
 tokenizer.pad_token = tokenizer.eos_token
 
-
+# Persist custom tokenizer configurations locally for seamless downstream distribution
 save_dir = "./textrm-2.0-tokenizer"
 os.makedirs(save_dir, exist_ok=True)
-# Save tokenizer
 tokenizer.save_pretrained(save_dir)
 
 print(f"Vocab size (Original): {tokenizer.vocab_size}")
-print(f"Vocab size (Added): {len(tokenizer)}")
+print(f"Vocab size (Expanded): {len(tokenizer)}")
 
-# Model
+# 2. Instantiate TinyRecursiveModel Conforming to the Streamlined Dynamic Configurations
+# CRITICAL FIX: Completely omitted `max_seq_len` as the core attention architecture has evolved to a fully fluid design.
 model = TinyRecursiveModel(
-    vocab_size=config["vocab_size"],
+    vocab_size=len(tokenizer), 
     dim=config["dim"],
     n_heads=config["n_heads"],
     n_layers=config["n_layers"],
     mlp_ratio=config["mlp_ratio"],
-    max_seq_len=config["max_seq_len"],
     n_latent_recursions=config["n_latent_recursions"],
     n_improvement_cycles=config["n_improvement_cycles"],
     num_experts=config["num_experts"],
 )
 
-# Count parameters
-n_params = sum(v.size for _, v in tree_flatten(model.parameters()))
-
-first_param = tree_flatten(model.parameters())[0][1]
+# 3. Compute Operational Metrics and Architecture Properties
+# Use `tree_flatten` dynamically over `model.trainable_parameters()` to gauge baseline parameters cleanly
+n_params = sum(v.size for _, v in tree_flatten(model.trainable_parameters()))
+first_param = tree_flatten(model.trainable_parameters())[0][1]
 
 print(f"Model parameters: {n_params:,} ({n_params / 1e6:.2f}M)")
 print(f"Model dtype: {first_param.dtype}")
