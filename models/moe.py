@@ -37,7 +37,7 @@ class MoELayer(nn.Module):
         logits = self.router(x_flat)
         if training:
             # Inject small exploratory noise safely using explicit dtype allocation to prevent in-place collision
-            noise = mx.random.normal(logits.shape, dtype=logits.dtype) * 0.01
+            noise = mx.random.normal(logits.shape, dtype=logits.dtype) * 0.15
             logits = logits + noise
 
         probs = mx.softmax(logits, axis=-1)

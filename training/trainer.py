@@ -20,7 +20,7 @@ def train(
     n_supervision_steps=4,
     gradient_accumulation_steps=2,
     ema_decay=0.9995,
-    aux_loss_coef=0.01,
+    aux_loss_coef=0.1,
     save_path="textrm-model.safetensors",
 ):
 
