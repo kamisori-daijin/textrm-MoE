@@ -24,6 +24,7 @@ checkpoints1.5/
 
 # Dataset Binaries
 *.bin
+bin_dataset/
 
 *.antigravitycli
 *.json
