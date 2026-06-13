@@ -13,7 +13,7 @@ config = {
     "gradient_accumulation_steps": 2, # Total effective batch = 64
     "epochs": 30,
     "lr": 1e-4,
-    "warmup_steps": 600,
+    "warmup_steps": 100,
     "n_supervision_steps": 3,  # Deep supervision steps during training
     "max_train_samples": 100000,  # Reduced for memory and speed
     "max_val_samples": 1000,
