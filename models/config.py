@@ -5,7 +5,7 @@ config = {
     "n_layers": 4,  # Only 4 layers
     "mlp_ratio": 4,
     "num_experts": 8,
-    "max_seq_len": 512,  
+    "max_seq_len": 4096,  
     "n_latent_recursions": 5,  
     "n_improvement_cycles": 2,  
     # Training
