@@ -1,9 +1,11 @@
 import os
 import math
+import glob
+import re
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
-from mlx.utils import tree_flatten, tree_map,tree_unflatten
+from mlx.utils import tree_flatten, tree_map, tree_unflatten
 from tqdm import tqdm
 
 from ema.ema import EMA
@@ -30,32 +32,62 @@ def train(
         learning_rate=lr_schedule, betas=[0.9, 0.95], weight_decay=0.1
     )
 
-
-    latest_model_path = "textrm_latest.safetensors"  # 重みファイルのパス
+    latest_model_path = "textrm_latest.safetensors"  
     latest_optim_path = "textrm_latest_optim.safetensors"
  
-    
-    if os.path.exists(latest_model_path):
-        print(f"🔄 Restoring model weights from checkpoint: {latest_model_path}")
+    # Resume from latest checkpoint if available
+    base_name, _ = os.path.splitext(save_path)
+    checkpoint_pattern = f"{base_name}_epoch*_val*.safetensors"
+    checkpoint_files = glob.glob(checkpoint_pattern)
+
+    chosen_model_path = None
+    start_epoch = 0
+
+    if checkpoint_files:
         try:
-            model.load_weights(latest_model_path)
-            print("✅ Model weights successfully restored.")
+            
+            checkpoint_files.sort(key=lambda x: int(re.search(r'_epoch(\d+)_', x).group(1)))
+            chosen_model_path = checkpoint_files[-1]
+            start_epoch = int(re.search(r'_epoch(\d+)_', chosen_model_path).group(1))
+            print(f"📦 Found saved epoch checkpoint: {chosen_model_path}")
+        except Exception:
+            chosen_model_path = None
+
+    
+    if not chosen_model_path and os.path.exists(latest_model_path):
+        chosen_model_path = latest_model_path
+        print(f"🔄 Epoch checkpoint not found. Falling back to latest: {latest_model_path}")
+
+
+    if chosen_model_path and os.path.exists(chosen_model_path):
+        print(f"🔄 Restoring model weights from: {chosen_model_path}")
+        try:
+            model.load_weights(chosen_model_path)
+            print(f"✅ Model weights successfully restored. (Resuming from Epoch {start_epoch + 1})")
         except Exception as e:
             print(f"⚠️ Failed to restore model weights: {e}")
 
-    if os.path.exists(latest_optim_path):
-        print(f"🔄 Restoring optimizer states from checkpoint: {latest_optim_path}")
+  
+    chosen_optim_path = None
+    if chosen_model_path and chosen_model_path != latest_model_path:
+        potential_optim = chosen_model_path.replace(".safetensors", f"_optim.safetensors")
+        if os.path.exists(potential_optim):
+            chosen_optim_path = potential_optim
+
+    if not chosen_optim_path and os.path.exists(latest_optim_path):
+        chosen_optim_path = latest_optim_path
+
+    if chosen_optim_path and os.path.exists(chosen_optim_path):
+        print(f"🔄 Restoring optimizer states from: {chosen_optim_path}")
         try:
-            loaded_flat_state = mx.load(latest_optim_path)
+            loaded_flat_state = mx.load(chosen_optim_path)
             if isinstance(loaded_flat_state, dict):
-                loaded_optim_state = tree_unflatten(loaded_flat_state)
-                optimizer.state = loaded_optim_state
+                optimizer.state = tree_unflatten(loaded_flat_state)
                 print("✅ Optimizer states successfully restored.")
             else:
                 print("⚠️ Loaded state was not a valid dictionary structure.")
         except Exception as e:
             print(f"⚠️ Failed to restore optimizer state: {e}")
-
 
     # Initialize EMA
     ema = EMA(model, decay=ema_decay)
@@ -101,10 +133,9 @@ def train(
         return model.trainable_parameters(), optimizer.state, next_ema_shadow
 
     best_val_loss = float("inf")
-    latest_model_path = "textrm_latest.safetensors"
 
-    # Main training loop
-    for epoch in range(epochs):
+   
+    for epoch in range(start_epoch, epochs):
         model.train()
 
         train_loader_inst = train_loader()
@@ -132,8 +163,7 @@ def train(
                 n = len(current_batches)
                 scale = mx.array(1.0 / n, dtype=param_dtype)
 
-                # Process sequentially in Python to break up Metal kernel sizes,
-                # but each accumulation step is tightly compiled.
+                # Process sequentially in Python to break up Metal kernel sizes
                 for x, y in current_batches:
                     accumulated_grads, loss, aux = _accumulate_step(
                         trainable_params, accumulated_grads, x, y, scale
@@ -168,10 +198,13 @@ def train(
 
         pbar.close()
         
-       
+      
         print(f"💾 Saving latest epoch {epoch + 1} checkpoints for session recovery...")
         model.save_weights(latest_model_path)
-        mx.save_safetensors(latest_optim_path, optimizer.state)
+        
+       
+        flat_latest_optim = dict(tree_flatten(optimizer.state, destination={}))
+        mx.save_safetensors(latest_optim_path, flat_latest_optim)
         
         # Apply EMA weights for evaluation
         ema.apply_shadow()
@@ -197,14 +230,13 @@ def train(
         if not ext:
             ext = ".safetensors"
 
+        
         checkpoint_name = f"{base}_epoch{epoch + 1:03d}_val{val_loss:.4f}{ext}"
         model.save_weights(checkpoint_name)
         print(f"Checkpoint saved: {checkpoint_name}")
 
        
         optim_checkpoint_name = f"{base}_epoch{epoch + 1:03d}_val{val_loss:.4f}_optim{ext}"
-        
-       
         flat_optim_state = dict(tree_flatten(optimizer.state, destination={}))
         mx.save_safetensors(optim_checkpoint_name, flat_optim_state)
         print(f"Optimizer state saved: {optim_checkpoint_name}")
