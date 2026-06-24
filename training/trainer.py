@@ -23,6 +23,7 @@ def train(
     gradient_accumulation_steps=2,
     ema_decay=0.9995,
     aux_loss_coef=0.1,
+    resume=False,
     save_path="textrm-model.safetensors",
 ):
 
@@ -35,59 +36,60 @@ def train(
     latest_model_path = "textrm_latest.safetensors"  
     latest_optim_path = "textrm_latest_optim.safetensors"
  
-    # Resume from latest checkpoint if available
-    base_name, _ = os.path.splitext(save_path)
-    checkpoint_pattern = f"{base_name}_epoch*_val*.safetensors"
-    checkpoint_files = glob.glob(checkpoint_pattern)
-
-    chosen_model_path = None
     start_epoch = 0
 
-    if checkpoint_files:
-        try:
-            
-            checkpoint_files.sort(key=lambda x: int(re.search(r'_epoch(\d+)_', x).group(1)))
-            chosen_model_path = checkpoint_files[-1]
-            start_epoch = int(re.search(r'_epoch(\d+)_', chosen_model_path).group(1))
-            print(f"📦 Found saved epoch checkpoint: {chosen_model_path}")
-        except Exception:
-            chosen_model_path = None
-
     
-    if not chosen_model_path and os.path.exists(latest_model_path):
-        chosen_model_path = latest_model_path
-        print(f"🔄 Epoch checkpoint not found. Falling back to latest: {latest_model_path}")
+    if resume:
+        base_name, _ = os.path.splitext(save_path)
+        checkpoint_pattern = f"{base_name}_epoch*_val*.safetensors"
+        checkpoint_files = glob.glob(checkpoint_pattern)
 
+        chosen_model_path = None
 
-    if chosen_model_path and os.path.exists(chosen_model_path):
-        print(f"🔄 Restoring model weights from: {chosen_model_path}")
-        try:
-            model.load_weights(chosen_model_path)
-            print(f"✅ Model weights successfully restored. (Resuming from Epoch {start_epoch + 1})")
-        except Exception as e:
-            print(f"⚠️ Failed to restore model weights: {e}")
+        if checkpoint_files:
+            try:
+                checkpoint_files.sort(key=lambda x: int(re.search(r'_epoch(\d+)_', x).group(1)))
+                chosen_model_path = checkpoint_files[-1]
+                start_epoch = int(re.search(r'_epoch(\d+)_', chosen_model_path).group(1))
+                print(f"📦 Found saved epoch checkpoint: {chosen_model_path}")
+            except Exception:
+                chosen_model_path = None
 
-  
-    chosen_optim_path = None
-    if chosen_model_path and chosen_model_path != latest_model_path:
-        potential_optim = chosen_model_path.replace(".safetensors", f"_optim.safetensors")
-        if os.path.exists(potential_optim):
-            chosen_optim_path = potential_optim
+        if not chosen_model_path and os.path.exists(latest_model_path):
+            chosen_model_path = latest_model_path
+            print(f"🔄 Epoch checkpoint not found. Falling back to latest: {latest_model_path}")
 
-    if not chosen_optim_path and os.path.exists(latest_optim_path):
-        chosen_optim_path = latest_optim_path
+        if chosen_model_path and os.path.exists(chosen_model_path):
+            print(f"🔄 Restoring model weights from: {chosen_model_path}")
+            try:
+                model.load_weights(chosen_model_path)
+                print(f"✅ Model weights successfully restored. (Resuming from Epoch {start_epoch + 1})")
+            except Exception as e:
+                print(f"⚠️ Failed to restore model weights: {e}")
 
-    if chosen_optim_path and os.path.exists(chosen_optim_path):
-        print(f"🔄 Restoring optimizer states from: {chosen_optim_path}")
-        try:
-            loaded_flat_state = mx.load(chosen_optim_path)
-            if isinstance(loaded_flat_state, dict):
-                optimizer.state = tree_unflatten(loaded_flat_state)
-                print("✅ Optimizer states successfully restored.")
-            else:
-                print("⚠️ Loaded state was not a valid dictionary structure.")
-        except Exception as e:
-            print(f"⚠️ Failed to restore optimizer state: {e}")
+        chosen_optim_path = None
+        if chosen_model_path and chosen_model_path != latest_model_path:
+            potential_optim = chosen_model_path.replace(".safetensors", f"_optim.safetensors")
+            if os.path.exists(potential_optim):
+                chosen_optim_path = potential_optim
+
+        if not chosen_optim_path and os.path.exists(latest_optim_path):
+            chosen_optim_path = latest_optim_path
+
+        if chosen_optim_path and os.path.exists(chosen_optim_path):
+            print(f"🔄 Restoring optimizer states from: {chosen_optim_path}")
+            try:
+                loaded_flat_state = mx.load(chosen_optim_path)
+                if isinstance(loaded_flat_state, dict):
+                    optimizer.state = tree_unflatten(loaded_flat_state)
+                    print("✅ Optimizer states successfully restored.")
+                else:
+                    print("⚠️ Loaded state was not a valid dictionary structure.")
+            except Exception as e:
+                print(f"⚠️ Failed to restore optimizer state: {e}")
+    else:
+   
+        print("🚀 Starting a fresh training session from scratch (Epoch 1).")
 
     # Initialize EMA
     ema = EMA(model, decay=ema_decay)
@@ -108,11 +110,15 @@ def train(
     def _accumulate_step(trainable_params, accumulated_grads, x, y, scale):
         (loss, aux), grads = loss_and_grad_fn(trainable_params, x, y)
         
-        # Accumulate scaled gradients inside a small compiled graph
+       
+        model.update(trainable_params) 
+        
         next_accumulated_grads = tree_map(
             lambda g, ag: ag + (g * scale), grads, accumulated_grads
         )
-        return next_accumulated_grads, loss, aux
+      
+        return trainable_params, next_accumulated_grads, loss, aux
+
 
     # 2. Compile optimizer and EMA updates together (Separated from loss graph)
     @mx.compile
@@ -164,12 +170,15 @@ def train(
                 scale = mx.array(1.0 / n, dtype=param_dtype)
 
                 # Process sequentially in Python to break up Metal kernel sizes
+               
                 for x, y in current_batches:
-                    accumulated_grads, loss, aux = _accumulate_step(
+                   
+                    trainable_params, accumulated_grads, loss, aux = _accumulate_step(
                         trainable_params, accumulated_grads, x, y, scale
                     )
                     total_loss = total_loss + loss * scale
                     total_aux = total_aux + aux * scale
+
 
                 # Apply weight updates using the separate compiled update function
                 trainable_params, optim_state, ema_shadow = _update_step(
