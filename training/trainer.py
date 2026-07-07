@@ -2,6 +2,7 @@ import os
 import math
 import glob
 import re
+from unittest.loader import defaultTestLoader
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as optim
@@ -23,12 +24,18 @@ def train(
     gradient_accumulation_steps=2,
     ema_decay=0.9995,
     aux_loss_coef=0.1,
-    resume=False,
+    resume=True,
     save_path="textrm-model.safetensors",
 ):
 
     # Set up learning rate schedule and optimizer
-    lr_schedule = optim.linear_schedule(0, lr, steps=warmup_steps)
+    if resume:
+       
+        lr_schedule = lambda step: mx.array(lr)
+    else:
+        
+        lr_schedule = optim.linear_schedule(0, lr, steps=warmup_steps)
+        
     optimizer = optim.AdamW(
         learning_rate=lr_schedule, betas=[0.9, 0.95], weight_decay=0.1
     )
@@ -127,7 +134,7 @@ def train(
         optimizer.state.update(optimizer_state)
         
         # Clip and apply gradients
-        grads, _ = optim.clip_grad_norm(accumulated_grads, 1.0)
+        grads, _ = optim.clip_grad_norm(accumulated_grads, 0.5)
         optimizer.update(model, grads)
         
         # Update EMA shadow
